@@ -228,7 +228,7 @@ async def get_status(job_id: str):
 @app.get("/health")
 async def health_check(): return {"status": "ok"}
 
-async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic"):
+def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic"):
     try:
         job_states[job_id] = {"step": "Extracting Audio...", "progress": 15}
         print(f"[{job_id}] 1. Extracting audio...")
@@ -346,7 +346,7 @@ async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())[:8]
     job_states[job_id] = {"step": "Downloading video...", "progress": 5}
     
-    async def url_pipeline():
+    def url_pipeline():
         in_vid = str(UPLOAD_DIR / f"{job_id}.mp4")
         aud_file = str(TEMP_DIR / f"{job_id}.mp3")
         srt_file = str(TEMP_DIR / f"{job_id}.srt")
@@ -362,7 +362,7 @@ async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([req.url])
             
-            await run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
+            run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
         except Exception as e:
             print(f"[{job_id}] URL Error: {e}")
             job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
@@ -384,7 +384,7 @@ async def process_video_s3(req: S3Request):
         print(f"[{job_id}] 0. Downloading video from S3...")
         s3_client.download_file(AWS_BUCKET_NAME, req.s3_key, in_vid)
             
-        await run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
+        run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
         
         print(f"[{job_id}] 7. Uploading final video back to S3...")
         final_s3_key = f"outputs/magical_{job_id}.mp4"
