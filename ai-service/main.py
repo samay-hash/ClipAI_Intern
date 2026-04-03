@@ -343,25 +343,33 @@ class UrlRequest(BaseModel):
     url: str
 
 @app.post("/process-url")
-async def process_video_url(req: UrlRequest):
+async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())[:8]
-    in_vid, aud_file, srt_file, out_vid = str(UPLOAD_DIR / f"{job_id}.mp4"), str(TEMP_DIR / f"{job_id}.mp3"), str(TEMP_DIR / f"{job_id}.srt"), str(OUTPUT_DIR / f"{job_id}.mp4")
+    job_states[job_id] = {"step": "Downloading video...", "progress": 5}
     
-    try:
-        print(f"[{job_id}] 0. Downloading video from URL...")
-        ydl_opts = {
-            'outtmpl': in_vid,
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4',
-            'quiet': True
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([req.url])
+    async def url_pipeline():
+        in_vid = str(UPLOAD_DIR / f"{job_id}.mp4")
+        aud_file = str(TEMP_DIR / f"{job_id}.mp3")
+        srt_file = str(TEMP_DIR / f"{job_id}.srt")
+        out_vid = str(OUTPUT_DIR / f"{job_id}.mp4")
+        try:
+            print(f"[{job_id}] 0. Downloading video from URL...")
+            ydl_opts = {
+                'outtmpl': in_vid,
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'merge_output_format': 'mp4',
+                'quiet': True
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([req.url])
             
-        return await run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
-    except Exception as e:
-        print(f"URL Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+            await run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
+        except Exception as e:
+            print(f"[{job_id}] URL Error: {e}")
+            job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
+    
+    background_tasks.add_task(url_pipeline)
+    return {"success": True, "job_id": job_id, "message": "URL processing started"}
 
 class S3Request(BaseModel):
     s3_key: str

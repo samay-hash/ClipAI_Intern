@@ -399,21 +399,35 @@ export default function Home() {
                            });
                            if (!response.ok) throw new Error("Failed to process URL");
                            const result = await response.json();
-                           if (result.success) {
-                             setProgress(100);
-                             setSegmentCount(result.transcript_segments || 0);
-                             const finalUrl = result.video_url.startsWith("http") ? result.video_url : `${API_URL}${result.video_url}`;
-                             setVideoUrl(finalUrl);
-                             setStatus("complete");
-                             
-                             const newHistory = [{
-                               id: result.job_id,
-                               name: externalUrl.split('/').pop() || "Video from URL",
-                               url: finalUrl,
-                               date: new Date().toLocaleDateString()
-                             }, ...history];
-                             setHistory(newHistory);
-                             localStorage.setItem("clipai_history", JSON.stringify(newHistory));
+                           if (result.success && result.job_id) {
+                             setStatusText("Downloading video...");
+                             // Poll for status (same as file upload)
+                             const pollInterval = setInterval(async () => {
+                               try {
+                                 const pollRes = await fetch(`${API_URL}/api/status/${result.job_id}`);
+                                 const pollData = await pollRes.json();
+                                 setProgress(pollData.progress || 10);
+                                 setStatusText(pollData.step || "Processing...");
+                                 if (pollData.progress === 100 && pollData.result) {
+                                   clearInterval(pollInterval);
+                                   setSegmentCount(pollData.result.transcript_segments || 0);
+                                   const finalUrl = pollData.result.video_url.startsWith("http") ? pollData.result.video_url : `${API_URL}${pollData.result.video_url}`;
+                                   setVideoUrl(finalUrl);
+                                   setStatus("complete");
+                                   const newHistory = [{
+                                     id: result.job_id,
+                                     name: externalUrl.split('/').pop() || "Video from URL",
+                                     url: finalUrl,
+                                     date: new Date().toLocaleDateString()
+                                   }, ...history];
+                                   setHistory(newHistory);
+                                   localStorage.setItem("clipai_history", JSON.stringify(newHistory));
+                                 } else if (pollData.step === "Failed") {
+                                   clearInterval(pollInterval);
+                                   throw new Error(pollData.error || "AI Processing Failed");
+                                 }
+                               } catch(e) { console.error(e); }
+                             }, 1500);
                            }
                         } catch(err) {
                            setErrorMsg("Error processing URL");
