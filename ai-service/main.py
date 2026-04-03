@@ -76,29 +76,32 @@ def get_broll_keywords(segments: list, style: str = "cinematic") -> list:
     full_text = " ".join([seg["text"] if isinstance(seg, dict) else getattr(seg, "text") for seg in segments])
     
     prompt = f"""
-    You are an AI video editor that suggests B-roll video search keywords.
-    Analyze the transcript below and identify the most contextually relevant moments where a visual change (B-roll) is necessary.
-    Extract between 1 to 4 moments depending strictly on the transcript's length.
-    For each moment, provide a very concise 1-3 word video search keyword (e.g., "dense forest", "coding room", "city sunset").
-    Determine the exact start and end time (in seconds) to insert this B-roll so it aligns with the spoken words. Make each clip last exactly 3.0 to 4.0 seconds.
-    Return ONLY a raw valid JSON array. Example: [{{"keyword": "dense forest", "start_time": 2.0, "end_time": 5.5}}]
+    You are an expert AI video editor. Your task is to deeply analyze the transcript and identify EVERY key point, important concept, or visual change.
+    Do NOT limit yourself. Extract as many B-roll moments as needed to make the video engaging (feel free to extract 5 to 15+ moments depending on transcript length).
+    For every key point, provide a highly refined and concise 1-3 word video search keyword (e.g., "coding laptop", "fast car", "happy team").
+    Determine exact start_time and end_time (in seconds) to insert this B-roll so it matches exactly when the subject is spoken. Each clip must last exactly 3.5 seconds.
+    Ensure the times do not overlap heavily and flow naturally.
+    Return ONLY a valid JSON object with a single key "brolls" containing an array of objects.
+    Example: {{"brolls": [{{"keyword": "coding laptop", "start_time": 2.0, "end_time": 5.5}}, {{"keyword": "happy team", "start_time": 6.0, "end_time": 9.5}}]}}
+    Transcript:
     {full_text}
     """
     
     try:
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile", temperature=0
+            model="llama-3.3-70b-versatile",
+            temperature=0.2,
+            response_format={"type": "json_object"}
         )
         content = response.choices[0].message.content
-        match = re.search(r'\[.*\]', content, re.DOTALL)
-        if match: return json.loads(match.group(0))
-        return []
+        data = json.loads(content)
+        return data.get("brolls", [])
     except Exception as e:
         print(f"B-roll generation error: {e}")
         return []
 
-def generate_ai_broll_image(prompt: str, download_path: str) -> bool:
+def generate_ai_broll_image_hf(prompt: str, download_path: str) -> bool:
     HF_API_KEY = os.getenv("HF_API_KEY")
     if not HF_API_KEY:
         print("HF API Key required for Generative AI B-rolls!")
@@ -109,16 +112,36 @@ def generate_ai_broll_image(prompt: str, download_path: str) -> bool:
     payload = {"inputs": prompt}
     
     try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=40)
+        # Reduced timeout so if model loads too slow, it falls back to Pollinations faster
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=20)
         if response.status_code == 200:
             with open(download_path, "wb") as f:
                 f.write(response.content)
             return True
         else:
-            print(f"HF Generation Failed: {response.text}")
+            print(f"HF Generation Failed (Status {response.status_code})")
             return False
     except Exception as e:
         print(f"HF Error: {e}")
+        return False
+
+def generate_ai_broll_image_pollinations(prompt: str, download_path: str) -> bool:
+    import urllib.parse
+    enhanced_prompt = f"{prompt}, cinematic, masterpiece, highly detailed, 8k resolution"
+    encoded_prompt = urllib.parse.quote(enhanced_prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1920&height=1080&nologo=true&seed=42"
+    
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            with open(download_path, "wb") as f:
+                f.write(response.content)
+            return True
+        else:
+            print(f"Pollinations Generation Failed: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Pollinations API Error: {e}")
         return False
 def fetch_pexels_video(keyword: str, download_path: str) -> bool:
     PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
@@ -156,6 +179,28 @@ def fetch_pexels_video(keyword: str, download_path: str) -> bool:
             return False
     except Exception as e:
         print(f"Pexels Error: {e}")
+        return False
+
+def fetch_pexels_image(keyword: str, download_path: str) -> bool:
+    PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+    if not PEXELS_API_KEY: return False
+    
+    url = f"https://api.pexels.com/v1/search?query={keyword}&per_page=1&orientation=landscape"
+    try:
+        response = requests.get(url, headers={"Authorization": PEXELS_API_KEY}, timeout=15).json()
+        photos = response.get("photos")
+        if photos and len(photos) > 0:
+            img_url = photos[0]["src"]["original"]
+            res = requests.get(img_url, stream=True)
+            with open(download_path, "wb") as f:
+                for chunk in res.iter_content(1024*1024):
+                    if chunk: f.write(chunk)
+            print(f"✅ Fetched Pexels Image for '{keyword}'")
+            return True
+        print(f"❌ No Pexels images found for '{keyword}'")
+        return False
+    except Exception as e:
+        print(f"Pexels Image Error: {e}")
         return False
 
 def generate_srt(segments: list, srt_path: str) -> bool:
@@ -224,30 +269,41 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             target_w, target_h = map(int, target_res.split("x"))
         except:
             target_w, target_h = 1920, 1080
-            target_res = f"{target_w}x{target_h}"
+            
+        target_w -= target_w % 2
+        target_h -= target_h % 2
+        target_res = f"{target_w}x{target_h}"
         
         for i, clip in enumerate(broll_info):
             is_image = clip['path'].lower().endswith(('.png', '.jpg', '.jpeg'))
-            duration = clip['end'] - clip['start']
+            duration = float(clip['end']) - float(clip['start'])
+            if duration <= 0: duration = 3.5
             
             if is_image:
                 inputs.extend(["-loop", "1", "-t", str(duration), "-i", clip['path']])
             else:
-                inputs.extend(["-i", clip['path']])
+                inputs.extend(["-t", str(duration), "-i", clip['path']])
                 
             # If BGM is used, our videos start at input 2, otherwise 1
             vid_idx = i + (2 if bgm_idx != -1 else 1)
-            start_t, end_t = clip['start'], clip['end']
+            start_t = float(clip['start'])
+            end_t = float(clip['end'])
             
-            # Scale B-roll to exactly match the target resolution, padding/cropping dynamically if necessary
+            # Use PTS shifting so the clip is aligned properly in time. 
+            # Fades are also mapped to the exact start/end time of the overlay.
+            setpts_filter = f"setpts=PTS-STARTPTS+{start_t}/TB"
+            fade_fx = f"format=yuva420p,fade=t=in:st={start_t}:d=0.5:alpha=1,fade=t=out:st={max(0, end_t-0.5)}:d=0.5:alpha=1"
+            
             if is_image:
                 # Add cinematic slow zoom (zoompan) to AI images and match dynamically discovered resolution
+                # For images, setpts must come AFTER zoompan generates the stream
                 filter_complex.append(
-                    f"[{vid_idx}:v]scale={target_w}:-1,zoompan=z='min(zoom+0.0015,1.5)':d={int(25*duration)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_res}[v{vid_idx}cropped];"
+                    f"[{vid_idx}:v]scale={target_res},zoompan=z='min(zoom+0.0015,1.5)':d={int(25*duration)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_res},{setpts_filter},{fade_fx}[v{vid_idx}cropped];"
                 )
             else:
+                # For video clips, we scale, crop, then align PTS and apply fade
                 filter_complex.append(
-                    f"[{vid_idx}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}[v{vid_idx}cropped];"
+                    f"[{vid_idx}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},{setpts_filter},{fade_fx}[v{vid_idx}cropped];"
                 )
             new_overlay = f"[ov{vid_idx}]"
             filter_complex.append(
@@ -262,7 +318,7 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             duration = float(subprocess.check_output(dur_cmd).decode().strip())
         except:
             pass
-        fade_filter = f",fade=t=in:st=0:d=1:color=white,fade=t=out:st={duration-1}:d=1:color=black" if duration > 3.0 else ""
+        fade_filter = f",fade=t=in:st=0:d=1:color=white,fade=t=out:st={max(0, duration-1)}:d=1:color=black" if duration > 3.0 else ""
         
         if os.path.exists(srt_path):
             escaped_srt = srt_path.replace("\\", "/").replace(":", "\\\\:")
@@ -320,19 +376,34 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 kw = br.get("prompt") or br.get("keyword") 
                 if not kw: continue
                 
+                start_t = float(br.get("start_time", 0))
+                end_t = float(br.get("end_time", start_t + 3.5))
+                
                 job_states[job_id] = {"step": f"Fetching B-Roll {i+1}...", "progress": 50 + (i*5)}
                 p_vid = str(TEMP_DIR / f"{job_id}_br_{i}.mp4")
                 p_img = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
                 
                 print(f"[{job_id}] 4a. Fetching Pexels B-Roll Video for '{kw[:30]}...'")
                 if fetch_pexels_video(kw, p_vid):
-                    downloaded.append({"path": p_vid, "start": br.get("start_time"), "end": br.get("end_time")})
+                    downloaded.append({"path": p_vid, "start": start_t, "end": end_t})
                 else:
-                    print(f"[{job_id}] 4b. Pexels failing... Falling back to AI Image Generator for '{kw[:30]}...'")
-                    job_states[job_id] = {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)}
-                    enhanced_prompt = f"A {style} highly detailed 4k cinematic shot of {kw}, photorealistic, stunning"
-                    if generate_ai_broll_image(enhanced_prompt, p_img):
-                        downloaded.append({"path": p_img, "start": br.get("start_time"), "end": br.get("end_time")})
+                    print(f"[{job_id}] 4b. Video failed! Fetching Pexels Stock Image for '{kw[:30]}...'")
+                    if fetch_pexels_image(kw, p_img):
+                        downloaded.append({"path": p_img, "start": start_t, "end": end_t})
+                    else:
+                        print(f"[{job_id}] 4c. Image search failed! Generating HF AI fallback for '{kw[:30]}...'")
+                        job_states[job_id] = {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)}
+                        enhanced_prompt = f"A {style} highly detailed 4k cinematic shot of {kw}, photorealistic, stunning"
+                        
+                        # 3. Try Hugging Face first
+                        if generate_ai_broll_image_hf(enhanced_prompt, p_img):
+                            downloaded.append({"path": p_img, "start": start_t, "end": end_t})
+                        else:
+                            print(f"[{job_id}] 4d. HF Failed! Falling back to Pollinations AI for '{kw}'")
+                            
+                            # 4. Try Pollinations if HF fails
+                            if generate_ai_broll_image_pollinations(enhanced_prompt, p_img):
+                                downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                 
         job_states[job_id] = {"step": "Designing Subtitles...", "progress": 70}
         print(f"[{job_id}] 5. Designing SRT Subtitles...")
