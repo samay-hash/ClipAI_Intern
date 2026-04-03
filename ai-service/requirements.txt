@@ -5,3 +5,5 @@ openai-whisper
 python-dotenv
 groq
 requests
+cloudinary
+yt-dlp
