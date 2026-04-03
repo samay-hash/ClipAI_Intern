@@ -281,8 +281,7 @@ async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll
             result = subprocess.run(cmd, capture_output=True)
             if result.returncode != 0:
                 print(f"FFmpeg stderr: {result.stderr.decode()[-500:]}")
-            success = result.returncode == 0
-            
+            success = result.returncode == 0 
         if not success: raise Exception("FFmpeg Rendering Failed")
         
         # Upload final video to Cloudinary
