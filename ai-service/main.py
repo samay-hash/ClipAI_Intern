@@ -316,48 +316,6 @@ async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll
     except Exception as e:
         print(f"[{job_id}] ❌ CRITICAL FAIL: {e}")
         job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
-    else:
-        # Fallback: just burn subtitles without B-roll, with cinematic fade
-        duration = 0.0
-        try:
-            duration = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", in_vid]).decode().strip())
-        except: pass
-        
-        fade_filter = f"fade=t=in:st=0:d=1:color=white,fade=t=out:st={max(0, duration-1)}:d=1:color=black" if duration > 3.0 else ""
-        srt_filter = f"subtitles={srt_file}" if os.path.exists(srt_file) else ""
-        
-        vf_filters = ",".join(filter(bool, [srt_filter, fade_filter]))
-        cmd = ["ffmpeg", "-y", "-i", in_vid]
-        if vf_filters:
-            cmd += ["-vf", vf_filters]
-        cmd += ["-c:a", "copy", "-c:v", "libx264", "-preset", "fast", out_vid]
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode != 0:
-            print(f"FFmpeg stderr: {result.stderr.decode()[-500:]}")
-        success = result.returncode == 0
-        
-    if not success: raise Exception("FFmpeg Rendering Failed")
-    
-    # Upload final video to Cloudinary
-    job_states[job_id] = {"step": "Uploading to Cloud...", "progress": 95}
-    video_url = f"/api/video/{job_id}"  # fallback local URL
-    if CLOUDINARY_CLOUD_NAME:
-        try:
-            print(f"[{job_id}] 7. Uploading final video to Cloudinary...")
-            res = cloudinary.uploader.upload_large(
-                out_vid, 
-                resource_type="video",
-                folder="clipai_outputs",
-                public_id=f"magical_{job_id}"
-            )
-            video_url = res.get("secure_url")
-            print(f"[{job_id}] ✅ Uploaded to Cloudinary: {video_url}")
-        except Exception as e:
-            print(f"[{job_id}] Cloudinary upload failed, using local: {e}")
-    
-    job_states[job_id] = {"step": "Complete!", "progress": 100}
-    print(f"[{job_id}] ✅ Video is Ready!")
-    return {"success": True, "job_id": job_id, "video_url": video_url, "transcript_segments": seg_count}
 
 @app.post("/process")
 async def process_video(

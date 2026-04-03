@@ -1,8 +1,3 @@
-/**
- * AI Video Editor - Backend API Server
- * Handles file uploads and proxies to the Python AI service.
- */
-
 const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
@@ -16,17 +11,14 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Create upload directory
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Multer config
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
@@ -49,12 +41,6 @@ const upload = multer({
   },
 });
 
-// ─── Routes ──────────────────────────────────────────────
-
-/**
- * POST /api/upload
- * Upload video and send to AI service for processing.
- */
 app.post("/api/upload", upload.single("video"), async (req, res) => {
   try {
     if (!req.file) {
@@ -74,6 +60,7 @@ app.post("/api/upload", upload.single("video"), async (req, res) => {
     const aiResponse = await fetch(`${AI_SERVICE_URL}/process`, {
       method: "POST",
       body: formData,
+      headers: formData.getHeaders(),
       timeout: 600000, // 10 min timeout for processing
     });
 
@@ -109,10 +96,6 @@ app.post("/api/upload", upload.single("video"), async (req, res) => {
   }
 });
 
-/**
- * POST /api/upload-url
- * Proxy URL processing to AI service.
- */
 app.post("/api/upload-url", async (req, res) => {
   try {
     const { videoUrl, language, captionStyle, brollApproach } = req.body;
@@ -147,11 +130,6 @@ app.post("/api/upload-url", async (req, res) => {
     res.status(500).json({ error: error.message || "Failed to process URL" });
   }
 });
-
-/**
- * GET /api/status/:jobId
- * Real-time status polling for frontend UI
- */
 app.get("/api/status/:jobId", async (req, res) => {
   try {
     const aiRes = await fetch(`${AI_SERVICE_URL}/status/${req.params.jobId}`);
@@ -164,11 +142,6 @@ app.get("/api/status/:jobId", async (req, res) => {
     res.json({ step: "Connecting...", progress: 0 });
   }
 });
-
-/**
- * GET /api/video/:jobId
- * Proxy the processed video from AI service.
- */
 app.get("/api/video/:jobId", async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -186,11 +159,6 @@ app.get("/api/video/:jobId", async (req, res) => {
     res.status(500).json({ error: "Failed to retrieve video" });
   }
 });
-
-/**
- * GET /api/health
- * Health check.
- */
 app.get("/api/health", async (req, res) => {
   let aiStatus = "unknown";
   try {
@@ -208,7 +176,6 @@ app.get("/api/health", async (req, res) => {
   });
 });
 
-// Error handler
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
@@ -218,7 +185,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: err.message });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`\n🚀 Backend server running on http://localhost:${PORT}`);
   console.log(`📡 AI Service expected at ${AI_SERVICE_URL}\n`);
