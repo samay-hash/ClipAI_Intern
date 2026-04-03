@@ -14,10 +14,31 @@ import yt_dlp
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
-from groq import Groq
 
+from groq import Groq
+from pymongo import MongoClient
 
 load_dotenv()
+MONGODB_URI = os.getenv("MONGODB_URI")
+db_client = MongoClient(MONGODB_URI) if MONGODB_URI else None
+jobs_collection = db_client["clipai"]["job_states"] if db_client else None
+
+job_states_mem = {}
+
+def update_job_state(job_id: str, state_data: dict):
+    if jobs_collection is not None:
+        jobs_collection.update_one({"job_id": job_id}, {"$set": state_data}, upsert=True)
+    else:
+        job_states_mem[job_id] = state_data
+
+def get_job_state(job_id: str, default=None):
+    if jobs_collection is not None:
+        state = jobs_collection.find_one({"job_id": job_id}, {"_id": 0})
+        return state if state else default
+    return job_states_mem.get(job_id, default)
+
+
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 
@@ -346,29 +367,29 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
         print("Burn error:", e)
         return False
 
-job_states = {}
+
 
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
-    return job_states.get(job_id, {"step": "Uploading video...", "progress": 0})
+    return get_job_state(job_id, {"step": "Uploading video...", "progress": 0})
 
 @app.get("/health")
 async def health_check(): return {"status": "ok"}
 
 def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic"):
     try:
-        job_states[job_id] = {"step": "Extracting Audio...", "progress": 15}
+        update_job_state(job_id, {"step": "Extracting Audio...", "progress": 15})
         print(f"[{job_id}] 1. Extracting audio...")
         extract_audio(in_vid, aud_file)
             
-        job_states[job_id] = {"step": "Transcribing with AI...", "progress": 30}
+        update_job_state(job_id, {"step": "Transcribing with AI...", "progress": 30})
         print(f"[{job_id}] 2. Transcribing with fast Groq API...")
         segments = transcribe_audio_groq(aud_file)
         seg_count = len(segments) if segments else 0
             
         downloaded = []
         if enable_broll:
-            job_states[job_id] = {"step": f"Generating {style.title()} Prompts...", "progress": 45}
+            update_job_state(job_id, {"step": f"Generating {style.title()} Prompts...", "progress": 45})
             print(f"[{job_id}] 3. Detecting B-Roll keywords with LLaMA...")
             brolls = get_broll_keywords(segments, style)
             
@@ -379,7 +400,7 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 start_t = float(br.get("start_time", 0))
                 end_t = float(br.get("end_time", start_t + 3.5))
                 
-                job_states[job_id] = {"step": f"Fetching B-Roll {i+1}...", "progress": 50 + (i*5)}
+                update_job_state(job_id, {"step": f"Fetching B-Roll {i+1}...", "progress": 50 + (i*5)})
                 p_vid = str(TEMP_DIR / f"{job_id}_br_{i}.mp4")
                 p_img = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
                 
@@ -392,7 +413,7 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                         downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                     else:
                         print(f"[{job_id}] 4c. Image search failed! Generating HF AI fallback for '{kw[:30]}...'")
-                        job_states[job_id] = {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)}
+                        update_job_state(job_id, {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)})
                         enhanced_prompt = f"A {style} highly detailed 4k cinematic shot of {kw}, photorealistic, stunning"
                         
                         # 3. Try Hugging Face first
@@ -405,16 +426,16 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                             if generate_ai_broll_image_pollinations(enhanced_prompt, p_img):
                                 downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                 
-        job_states[job_id] = {"step": "Designing Subtitles...", "progress": 70}
+        update_job_state(job_id, {"step": "Designing Subtitles...", "progress": 70})
         print(f"[{job_id}] 5. Designing SRT Subtitles...")
         generate_srt(segments, srt_file)
         
-        job_states[job_id] = {"step": "Applying Audio Mix...", "progress": 85}
+        update_job_state(job_id, {"step": "Applying Audio Mix...", "progress": 85})
         bgm_path = str(TEMP_DIR / f"bgm_{style}.mp3")
         print(f"[{job_id}] 6. Downloading Background Music...")
         download_bgm(bgm_path, style)
         
-        job_states[job_id] = {"step": "Rendering Magical Video...", "progress": 90}
+        update_job_state(job_id, {"step": "Rendering Magical Video...", "progress": 90})
         print(f"[{job_id}] 7. Rendering final magical video with FFmpeg...")
         if downloaded:
             success = burn_complex_video(in_vid, srt_file, downloaded, out_vid, bgm_path)
@@ -425,7 +446,7 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
         if not success: raise Exception("FFmpeg Rendering Failed")
         
         # Upload final video to Cloudinary
-        job_states[job_id] = {"step": "Uploading to Cloud...", "progress": 95}
+        update_job_state(job_id, {"step": "Uploading to Cloud...", "progress": 95})
         video_url = f"/api/video/{job_id}"  # fallback local URL
         if CLOUDINARY_CLOUD_NAME:
             try:
@@ -441,7 +462,7 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
             except Exception as e:
                 print(f"[{job_id}] Cloudinary upload failed, using local: {e}")
         
-        job_states[job_id] = {
+        update_job_state(job_id, {
             "step": "Complete!", 
             "progress": 100, 
             "result": {
@@ -450,11 +471,11 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 "video_url": video_url, 
                 "transcript_segments": seg_count
             }
-        }
+        })
         print(f"[{job_id}] ✅ Video is Ready!")
     except Exception as e:
         print(f"[{job_id}] ❌ CRITICAL FAIL: {e}")
-        job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
+        update_job_state(job_id, {"step": "Failed", "progress": 0, "error": str(e)})
 
 @app.post("/process")
 async def process_video(
@@ -464,7 +485,7 @@ async def process_video(
     style: str = Form("cinematic")
 ):
     job_id = str(uuid.uuid4())[:8]
-    job_states[job_id] = {"step": "Initializing...", "progress": 5}
+    update_job_state(job_id, {"step": "Initializing...", "progress": 5})
     ext = Path(file.filename).suffix or ".mp4"
     in_vid, aud_file, srt_file, out_vid = str(UPLOAD_DIR / f"{job_id}{ext}"), str(TEMP_DIR / f"{job_id}.mp3"), str(TEMP_DIR / f"{job_id}.srt"), str(OUTPUT_DIR / f"{job_id}.mp4")
     
@@ -475,7 +496,7 @@ async def process_video(
         background_tasks.add_task(run_pipeline, job_id, in_vid, aud_file, srt_file, out_vid, enable_broll, style)
         return {"success": True, "job_id": job_id, "message": "Processing started in background"}
     except Exception as e:
-        job_states[job_id] = {"step": "Failed", "progress": 0}
+        update_job_state(job_id, {"step": "Failed", "progress": 0})
         raise HTTPException(status_code=500, detail=str(e))
 
 class UrlRequest(BaseModel):
@@ -484,7 +505,7 @@ class UrlRequest(BaseModel):
 @app.post("/process-url")
 async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())[:8]
-    job_states[job_id] = {"step": "Downloading video...", "progress": 5}
+    update_job_state(job_id, {"step": "Downloading video...", "progress": 5})
     
     def url_pipeline():
         in_vid = str(UPLOAD_DIR / f"{job_id}.mp4")
@@ -505,7 +526,7 @@ async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
             run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
         except Exception as e:
             print(f"[{job_id}] URL Error: {e}")
-            job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
+            update_job_state(job_id, {"step": "Failed", "progress": 0, "error": str(e)})
     
     background_tasks.add_task(url_pipeline)
     return {"success": True, "job_id": job_id, "message": "URL processing started"}
