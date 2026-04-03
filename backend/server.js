@@ -68,6 +68,8 @@ app.post("/api/upload", upload.single("video"), async (req, res) => {
 
     const formData = new FormData();
     formData.append("file", fs.createReadStream(req.file.path));
+    formData.append("enable_broll", req.body.enableBroll === 'false' ? 'False' : 'True');
+    formData.append("style", req.body.style || 'cinematic');
 
     const aiResponse = await fetch(`${AI_SERVICE_URL}/process`, {
       method: "POST",
@@ -143,6 +145,23 @@ app.post("/api/upload-url", async (req, res) => {
   } catch (error) {
     console.error("❌ Upload/process URL error:", error.message);
     res.status(500).json({ error: error.message || "Failed to process URL" });
+  }
+});
+
+/**
+ * GET /api/status/:jobId
+ * Real-time status polling for frontend UI
+ */
+app.get("/api/status/:jobId", async (req, res) => {
+  try {
+    const aiRes = await fetch(`${AI_SERVICE_URL}/status/${req.params.jobId}`);
+    if (aiRes.ok) {
+      res.json(await aiRes.json());
+    } else {
+      res.json({ step: "Connecting...", progress: 0 });
+    }
+  } catch (error) {
+    res.json({ step: "Connecting...", progress: 0 });
   }
 });
 

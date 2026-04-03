@@ -6,7 +6,10 @@
 
 ## 🌟 How It Works (The Magic)
 
-ClipAI operates on our newly introduced **Option B: Generative AI Architecture**. Instead of fetching repetitive stock footage, it invents it!
+ClipAI operates on our newly introduced **Option B: Generative AI Architecture**.
+
+> **Option B Justification (Why Generative AI instead of Stock APIs?)**
+> When evaluating **Option A (Pexels Stock)** vs **Option B (Hugging Face Generative)**, we architecturally committed to Option B. While Stock APIs are vastly cheaper and faster to query, they lack contextual perfection and semantic depth. If the speaker mentions "A glowing coffee cup next to a 1980s computer," stock footage will only return generic office workers or plain coffee imagery. By utilizing *Text-to-Image Generation (Stable Diffusion)* synced with LLM-orchestrated prompt-engineering, the application mathematically ensures a 100% emotional and visual relevance to exactly what the speaker is discussing in real-time. This provides an elevated, hyper-personalized "Vlog" experience that stock retrieval simply cannot replicate, despite the higher computational cost.
 
 1. **Audio Extraction & Whisper:** The video is stripped of audio, which is efficiently converted to `.mp3` format and run through **Groq Whisper** to create accurate transcriptions and segment logic.
 2. **LLaMA-3 Contextual Prompting:** The transcript is analyzed by **LLaMA-3.3-70B** (via Groq). The LLM determines the most visually interesting moments in the video and generates highly detailed, cinematic Text-to-Image prompts (e.g. *"A 4K photorealistic cinematic shot of a hacker typing down code"*).

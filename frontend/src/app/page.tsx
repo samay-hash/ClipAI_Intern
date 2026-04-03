@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-const API_URL = "http://localhost:5001";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
@@ -17,7 +17,9 @@ export default function Home() {
   const [segmentCount, setSegmentCount] = useState(0);
   
   // New Assignment Features
-  const [brollApproach, setBrollApproach] = useState("stock");
+  const [enableBroll, setEnableBroll] = useState(true);
+  const [style, setStyle] = useState("cinematic");
+  const [statusText, setStatusText] = useState("Initializing...");
   const [captionStyle, setCaptionStyle] = useState("clean");
   const [language, setLanguage] = useState("auto");
   const [externalUrl, setExternalUrl] = useState("");
@@ -33,18 +35,7 @@ export default function Home() {
   const resultRef = useRef<HTMLDivElement>(null);
   const uploadRef = useRef<HTMLDivElement>(null);
 
-  // Simulate progress during processing
-  useEffect(() => {
-    if (status === "processing") {
-      const interval = setInterval(() => {
-        setProgress((prev) => {
-          if (prev >= 90) return 90;
-          return prev + Math.random() * 8;
-        });
-      }, 800);
-      return () => clearInterval(interval);
-    }
-  }, [status]);
+
 
   // Scroll to result when complete
   useEffect(() => {
@@ -87,7 +78,8 @@ export default function Home() {
       formData.append("video", file);
       formData.append("language", language);
       formData.append("captionStyle", captionStyle);
-      formData.append("brollApproach", brollApproach);
+      formData.append("enableBroll", enableBroll.toString());
+      formData.append("style", style);
 
       // Simulate upload progress
       const uploadInterval = setInterval(() => {
@@ -106,31 +98,49 @@ export default function Home() {
         throw new Error(data.error || "Upload failed");
       }
 
-      setProgress(100);
-      setStatus("processing");
-      setProgress(0);
-
       const result = await response.json();
 
-      if (result.success) {
-        setProgress(100);
-        setSegmentCount(result.transcript_segments || 0);
-        const finalUrl = result.video_url.startsWith("http") ? result.video_url : `${API_URL}${result.video_url}`;
-        setVideoUrl(finalUrl);
-        setStatus("complete");
+      if (result.success && result.job_id) {
+        setStatus("processing");
+        setProgress(5);
+        setStatusText("Processing started in background");
         
-        // Save to gallery
-        const newHistory = [{
-          id: result.job_id,
-          name: file.name,
-          url: finalUrl,
-          date: new Date().toLocaleDateString()
-        }, ...history];
-        setHistory(newHistory);
-        localStorage.setItem("clipai_history", JSON.stringify(newHistory));
-        
+        // Start long-polling for real-time accurate status
+        const pollInterval = setInterval(async () => {
+           try {
+              const pollRes = await fetch(`${API_URL}/api/status/${result.job_id}`);
+              const pollData = await pollRes.json();
+              
+              setProgress(pollData.progress || 10);
+              setStatusText(pollData.step || "Processing...");
+              
+              if (pollData.progress === 100 && pollData.result) {
+                 clearInterval(pollInterval);
+                 setSegmentCount(pollData.result.transcript_segments || 0);
+                 const finalUrl = pollData.result.video_url.startsWith("http") ? pollData.result.video_url : `${API_URL}${pollData.result.video_url}`;
+                 setVideoUrl(finalUrl);
+                 setStatus("complete");
+                 
+                 // Save to gallery
+                 const newHistory = [{
+                   id: result.job_id,
+                   name: file.name,
+                   url: finalUrl,
+                   date: new Date().toLocaleDateString()
+                 }, ...history];
+                 setHistory(newHistory);
+                 localStorage.setItem("clipai_history", JSON.stringify(newHistory));
+              } else if (pollData.step === "Failed") {
+                 clearInterval(pollInterval);
+                 throw new Error(pollData.error || "AI Processing Failed");
+              }
+           } catch(e) {
+              console.error(e);
+           }
+        }, 1500);
+
       } else {
-        throw new Error(result.error || "Processing failed");
+        throw new Error(result.error || "Processing initialization failed");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Something went wrong";
@@ -307,9 +317,14 @@ export default function Home() {
                 <option value="clean">Clean (White)</option>
                 <option value="hormozi">Action (Yellow & Bold)</option>
              </select>
-             <select value={brollApproach} onChange={(e) => setBrollApproach(e.target.value)} className="flex-1 p-3 rounded-xl border border-[var(--border)] bg-transparent text-sm">
-                <option value="stock">AI Stock B-Roll (Pexels)</option>
-                <option value="none">None (Captions Only)</option>
+             <select value={enableBroll.toString()} onChange={(e) => setEnableBroll(e.target.value === 'true')} className="flex-1 p-3 rounded-xl border border-[var(--border)] bg-transparent text-sm">
+                <option value="true">Auto AI B-Roll: ON</option>
+                <option value="false">Auto AI B-Roll: OFF (Captions Only)</option>
+             </select>
+             <select value={style} onChange={(e) => setStyle(e.target.value)} disabled={!enableBroll} className={`flex-1 p-3 rounded-xl border border-[var(--border)] bg-transparent text-sm ${!enableBroll ? 'opacity-50' : ''}`}>
+                <option value="cinematic">Style: Cinematic / Vlog</option>
+                <option value="hyper-realistic cyberpunk">Style: Cyberpunk</option>
+                <option value="anime aesthetic">Style: Anime / 2D</option>
              </select>
           </div>
 
@@ -379,7 +394,7 @@ export default function Home() {
                               headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({
                                  videoUrl: externalUrl,
-                                 language, captionStyle, brollApproach
+                                 language, captionStyle, enableBroll, style
                               })
                            });
                            if (!response.ok) throw new Error("Failed to process URL");
@@ -467,11 +482,11 @@ export default function Home() {
 
               {status === "processing" && (
                 <div className="mt-6 p-4 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-light)] animate-fade-in">
-                  <p className="text-sm text-[var(--text-secondary)] flex items-center gap-2">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <p className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
                       <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
                     </svg>
-                    Extracting audio → Transcribing with Whisper → Generating captions...
+                    {statusText}
                   </p>
                 </div>
               )}
@@ -659,6 +674,82 @@ export default function Home() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+      </section>
+      
+      {/* ─── Developer Architecture ─── */}
+      <section className="section px-6 border-t border-[var(--border-light)] bg-black/[0.02] dark:bg-white/[0.02]">
+        <div className="max-w-6xl mx-auto">
+          <div className="text-center mb-16">
+            <span className="inline-block px-3 py-1 bg-[var(--text-primary)] text-[var(--bg-primary)] rounded-full text-xs font-mono font-bold tracking-widest uppercase mb-4 shadow-sm">AI Core Engine</span>
+            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-4">Inside the AI Pipeline</h2>
+            <p className="text-[var(--text-secondary)] max-w-2xl mx-auto leading-relaxed">
+              Step-by-step breakdown of how the Python backend processes your video with AI logic.
+            </p>
+          </div>
+
+          <div className="relative p-6 sm:p-10 rounded-3xl bg-[var(--bg-primary)] border border-[var(--border)] overflow-hidden shadow-xl">
+              <div className="hidden lg:block absolute top-[40%] left-[10%] right-[10%] h-[3px] bg-gradient-to-r from-[var(--text-muted)] via-purple-500/50 to-[var(--text-muted)] opacity-20 -z-0 rounded-full"></div>
+              
+              <div className="flex flex-col lg:flex-row items-center justify-between gap-6 relative z-10 w-full px-2">
+                 
+                 {/* Node 1 */}
+                 <div className="flex flex-col items-center w-full lg:w-1/5 group cursor-default">
+                    <div className="w-16 h-16 mb-4 rounded-xl bg-orange-50/50 dark:bg-orange-900/10 border border-orange-500/30 flex items-center justify-center transition-transform group-hover:-translate-y-1 relative">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#F97316" strokeWidth="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                        <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-orange-400 animate-pulse"></div>
+                    </div>
+                    <h4 className="font-semibold text-[13px] mb-1">1. Audio Extract</h4>
+                    <p className="text-[11px] text-[var(--text-muted)] text-center">FFmpeg Subprocess</p>
+                 </div>
+                 
+                 <div className="hidden lg:block w-4 text-[var(--border-light)]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+                 
+                 {/* Node 2 */}
+                 <div className="flex flex-col items-center w-full lg:w-1/5 group cursor-default">
+                    <div className="w-16 h-16 mb-4 rounded-xl bg-emerald-50/50 dark:bg-emerald-900/10 border border-emerald-500/30 flex items-center justify-center transition-transform group-hover:-translate-y-1">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10B981" strokeWidth="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                    </div>
+                    <h4 className="font-semibold text-[13px] mb-1">2. Transcribe</h4>
+                    <p className="text-[11px] text-[var(--text-muted)] text-center">Groq Whisper API</p>
+                 </div>
+                 
+                 <div className="hidden lg:block w-4 text-[var(--border-light)]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+
+                 {/* Node 3 */}
+                 <div className="flex flex-col items-center w-full lg:w-1/5 group cursor-default">
+                    <div className="w-16 h-16 mb-4 rounded-xl bg-blue-50/50 dark:bg-blue-900/10 border border-blue-500/30 flex items-center justify-center transition-transform group-hover:-translate-y-1">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#3B82F6" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    </div>
+                    <h4 className="font-semibold text-[13px] mb-1 text-center">3. Context Analysis</h4>
+                    <p className="text-[11px] text-[var(--text-muted)] text-center">LLaMA-3 70B</p>
+                 </div>
+                 
+                 <div className="hidden lg:block w-4 text-[var(--border-light)]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+
+                 {/* Node 4 */}
+                 <div className="flex flex-col items-center w-full lg:w-1/5 group cursor-default">
+                    <div className="w-16 h-16 mb-4 rounded-xl bg-purple-50/50 dark:bg-purple-900/10 border border-purple-500/30 shadow-[0_0_15px_rgba(168,85,247,0.2)] flex items-center justify-center transition-transform group-hover:-translate-y-1 relative">
+                        <div className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-purple-400 animate-pulse"></div>
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#A855F7" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    </div>
+                    <h4 className="font-semibold text-[13px] mb-1">4. Image Gen</h4>
+                    <p className="text-[11px] text-[var(--text-muted)] text-center">Stable Diffusion XL</p>
+                 </div>
+                 
+                 <div className="hidden lg:block w-4 text-[var(--border-light)]"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg></div>
+
+                 {/* Node 5 */}
+                 <div className="flex flex-col items-center w-full lg:w-1/5 group cursor-default">
+                    <div className="w-16 h-16 mb-4 rounded-xl bg-pink-50/50 dark:bg-pink-900/10 border border-pink-500/30 flex items-center justify-center transition-transform group-hover:-translate-y-1">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#EC4899" strokeWidth="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
+                    </div>
+                    <h4 className="font-semibold text-[13px] mb-1">5. Compositing</h4>
+                    <p className="text-[11px] text-[var(--text-muted)] text-center">FFmpeg Video Burn</p>
+                 </div>
+
+              </div>
           </div>
         </div>
       </section>

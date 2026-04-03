@@ -4,7 +4,7 @@ import subprocess
 import json
 import re
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -71,16 +71,17 @@ def transcribe_audio_groq(audio_path: str) -> list:
         print(f"Transcription error: {e}")
         return []
 
-def get_broll_keywords(segments: list) -> list:
+def get_broll_keywords(segments: list, style: str = "cinematic") -> list:
     if not segments or not groq_client: return []
     full_text = " ".join([seg["text"] if isinstance(seg, dict) else getattr(seg, "text") for seg in segments])
     
     prompt = f"""
     You are an AI video editor that suggests Generative AI Image Prompts.
-    Based on the following transcript, pick the 2 most visually interesting and distinct concepts that can be shown as B-roll clips.
-    For each, provide a "highly detailed, photorealistic, cinematic prompt" (max 15 words) to use on an AI Image Generator.
-    Also, figure out the start and end time (in seconds) to insert this B-roll so it matches nicely with the transcript flow. Make each clip last exactly 3.5 seconds.
-    Return ONLY a raw valid JSON array. Example: [{{"prompt": "A cinematic 4k highly detailed shot of a glowing laptop screen", "start_time": 2.0, "end_time": 5.5}}]
+    Analyze the transcript below and dynamically identify the most contextually relevant moments where a visual change (B-roll) is necessary (e.g. subject changes, vivid descriptions).
+    Extract between 1 to 4 moments depending strictly on the transcript's length and visual density.
+    For each moment, provide a "highly detailed, {style}, photorealistic prompt" (max 15 words) to use on an AI Image Generator.
+    Determine the exact start and end time (in seconds) to insert this B-roll so it mathematically aligns with the spoken words. Make each clip last exactly 3.5 seconds.
+    Return ONLY a raw valid JSON array. Example: [{{"prompt": "A {style} 4k highly detailed shot of a glowing laptop screen", "start_time": 2.0, "end_time": 5.5}}]
     Here is the transcript:
     {full_text}
     """
@@ -138,11 +139,27 @@ def generate_srt(segments: list, srt_path: str) -> bool:
         return True
     except: return False
 
+def get_video_resolution(video_path: str) -> str:
+    try:
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", video_path]
+        return subprocess.check_output(cmd).decode().strip()
+    except Exception as e:
+        print(f"Failed to get resolution: {e}")
+        return "1920x1080" # safe fallback
+
 def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_path: str) -> bool:
     try:
         inputs = ["-i", main_video]
         filter_complex = []
         overlay_chain = "[0:v]"
+        
+        # Dynamically determine the exact resolution of the input video to strictly avoid bounds mismatch
+        target_res = get_video_resolution(main_video)
+        try:
+            target_w, target_h = map(int, target_res.split("x"))
+        except:
+            target_w, target_h = 1920, 1080
+            target_res = f"{target_w}x{target_h}"
         
         for i, clip in enumerate(broll_info):
             is_image = clip['path'].lower().endswith(('.png', '.jpg', '.jpeg'))
@@ -156,15 +173,15 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             vid_idx = i + 1
             start_t, end_t = clip['start'], clip['end']
             
-            # Scale B-roll to match main video, then crop to exact size
+            # Scale B-roll to exactly match the target resolution, padding/cropping dynamically if necessary
             if is_image:
-                # Add cinematic slow zoom (zoompan) to AI images to make them feel like videos
+                # Add cinematic slow zoom (zoompan) to AI images and match dynamically discovered resolution
                 filter_complex.append(
-                    f"[{vid_idx}:v]scale=1920:-1,zoompan=z='min(zoom+0.0015,1.5)':d={int(25*duration)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080[v{vid_idx}cropped];"
+                    f"[{vid_idx}:v]scale={target_w}:-1,zoompan=z='min(zoom+0.0015,1.5)':d={int(25*duration)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_res}[v{vid_idx}cropped];"
                 )
             else:
                 filter_complex.append(
-                    f"[{vid_idx}:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080[v{vid_idx}cropped];"
+                    f"[{vid_idx}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h}[v{vid_idx}cropped];"
                 )
             new_overlay = f"[ov{vid_idx}]"
             filter_complex.append(
@@ -202,36 +219,103 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
         print("Burn error:", e)
         return False
 
+job_states = {}
+
+@app.get("/status/{job_id}")
+async def get_status(job_id: str):
+    return job_states.get(job_id, {"step": "Uploading video...", "progress": 0})
+
 @app.get("/health")
 async def health_check(): return {"status": "ok"}
 
-async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid):
-    print(f"[{job_id}] 1. Extracting audio...")
-    extract_audio(in_vid, aud_file)
+async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic"):
+    try:
+        job_states[job_id] = {"step": "Extracting Audio...", "progress": 15}
+        print(f"[{job_id}] 1. Extracting audio...")
+        extract_audio(in_vid, aud_file)
+            
+        job_states[job_id] = {"step": "Transcribing with AI...", "progress": 30}
+        print(f"[{job_id}] 2. Transcribing with fast Groq API...")
+        segments = transcribe_audio_groq(aud_file)
+        seg_count = len(segments) if segments else 0
+            
+        downloaded = []
+        if enable_broll:
+            job_states[job_id] = {"step": f"Generating {style.title()} Prompts...", "progress": 45}
+            print(f"[{job_id}] 3. Detecting B-Roll keywords with LLaMA...")
+            brolls = get_broll_keywords(segments, style)
+            
+            for i, br in enumerate(brolls):
+                kw = br.get("prompt") or br.get("keyword") 
+                if not kw: continue
+                
+                job_states[job_id] = {"step": f"Synthesizing Frame {i+1}...", "progress": 50 + (i*5)}
+                p = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
+                print(f"[{job_id}] 4. Generating AI B-Roll Image for '{kw[:30]}...'")
+                if generate_ai_broll_image(kw, p):
+                    downloaded.append({"path": p, "start": br.get("start_time"), "end": br.get("end_time")})
+                
+        job_states[job_id] = {"step": "Designing Subtitles...", "progress": 70}
+        print(f"[{job_id}] 5. Designing SRT Subtitles...")
+        generate_srt(segments, srt_file)
         
-    print(f"[{job_id}] 2. Transcribing with fast Groq API...")
-    segments = transcribe_audio_groq(aud_file)
-    seg_count = len(segments) if segments else 0
+        job_states[job_id] = {"step": "Rendering Magical Video...", "progress": 85}
+        print(f"[{job_id}] 6. Rendering magical final video...")
+        if downloaded:
+            success = burn_complex_video(in_vid, srt_file, downloaded, out_vid)
+        else:
+            # Fallback: just burn subtitles without B-roll, with cinematic fade
+            duration = 0.0
+            try:
+                duration = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", in_vid]).decode().strip())
+            except: pass
+            
+            fade_filter = f"fade=t=in:st=0:d=1:color=white,fade=t=out:st={max(0, duration-1)}:d=1:color=black" if duration > 3.0 else ""
+            srt_filter = f"subtitles={srt_file}" if os.path.exists(srt_file) else ""
+            
+            vf_filters = ",".join(filter(bool, [srt_filter, fade_filter]))
+            cmd = ["ffmpeg", "-y", "-i", in_vid]
+            if vf_filters:
+                cmd += ["-vf", vf_filters]
+            cmd += ["-c:a", "copy", "-c:v", "libx264", "-preset", "fast", out_vid]
+            result = subprocess.run(cmd, capture_output=True)
+            if result.returncode != 0:
+                print(f"FFmpeg stderr: {result.stderr.decode()[-500:]}")
+            success = result.returncode == 0
+            
+        if not success: raise Exception("FFmpeg Rendering Failed")
         
-    print(f"[{job_id}] 3. Detecting B-Roll keywords with LLaMA...")
-    brolls = get_broll_keywords(segments)
-    
-    downloaded = []
-    for i, br in enumerate(brolls):
-        # We now look for 'prompt' instead of keyword for Generative AI
-        kw = br.get("prompt") or br.get("keyword") 
-        if not kw: continue
-        p = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
-        print(f"[{job_id}] 4. Generating AI B-Roll Image for '{kw[:30]}...'")
-        if generate_ai_broll_image(kw, p):
-            downloaded.append({"path": p, "start": br.get("start_time"), "end": br.get("end_time")})
+        # Upload final video to Cloudinary
+        job_states[job_id] = {"step": "Uploading to Cloud...", "progress": 95}
+        video_url = f"/api/video/{job_id}"  # fallback local URL
+        if CLOUDINARY_CLOUD_NAME:
+            try:
+                print(f"[{job_id}] 7. Uploading final video to Cloudinary...")
+                res = cloudinary.uploader.upload_large(
+                    out_vid, 
+                    resource_type="video",
+                    folder="clipai_outputs",
+                    public_id=f"magical_{job_id}"
+                )
+                video_url = res.get("secure_url")
+                print(f"[{job_id}] ✅ Uploaded to Cloudinary: {video_url}")
+            except Exception as e:
+                print(f"[{job_id}] Cloudinary upload failed, using local: {e}")
         
-    print(f"[{job_id}] 5. Designing SRT Subtitles...")
-    generate_srt(segments, srt_file)
-    
-    print(f"[{job_id}] 6. Rendering magical final video...")
-    if downloaded:
-        success = burn_complex_video(in_vid, srt_file, downloaded, out_vid)
+        job_states[job_id] = {
+            "step": "Complete!", 
+            "progress": 100, 
+            "result": {
+                "success": True, 
+                "job_id": job_id, 
+                "video_url": video_url, 
+                "transcript_segments": seg_count
+            }
+        }
+        print(f"[{job_id}] ✅ Video is Ready!")
+    except Exception as e:
+        print(f"[{job_id}] ❌ CRITICAL FAIL: {e}")
+        job_states[job_id] = {"step": "Failed", "progress": 0, "error": str(e)}
     else:
         # Fallback: just burn subtitles without B-roll, with cinematic fade
         duration = 0.0
@@ -255,6 +339,7 @@ async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid):
     if not success: raise Exception("FFmpeg Rendering Failed")
     
     # Upload final video to Cloudinary
+    job_states[job_id] = {"step": "Uploading to Cloud...", "progress": 95}
     video_url = f"/api/video/{job_id}"  # fallback local URL
     if CLOUDINARY_CLOUD_NAME:
         try:
@@ -270,20 +355,30 @@ async def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid):
         except Exception as e:
             print(f"[{job_id}] Cloudinary upload failed, using local: {e}")
     
+    job_states[job_id] = {"step": "Complete!", "progress": 100}
     print(f"[{job_id}] ✅ Video is Ready!")
     return {"success": True, "job_id": job_id, "video_url": video_url, "transcript_segments": seg_count}
 
 @app.post("/process")
-async def process_video(file: UploadFile = File(...)):
+async def process_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...), 
+    enable_broll: bool = Form(True), 
+    style: str = Form("cinematic")
+):
     job_id = str(uuid.uuid4())[:8]
+    job_states[job_id] = {"step": "Initializing...", "progress": 5}
     ext = Path(file.filename).suffix or ".mp4"
     in_vid, aud_file, srt_file, out_vid = str(UPLOAD_DIR / f"{job_id}{ext}"), str(TEMP_DIR / f"{job_id}.mp3"), str(TEMP_DIR / f"{job_id}.srt"), str(OUTPUT_DIR / f"{job_id}.mp4")
     
     try:
         content = await file.read()
         with open(in_vid, "wb") as f: f.write(content)
-        return await run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
+        # Run heavy pipeline processing async so we can poll status later!
+        background_tasks.add_task(run_pipeline, job_id, in_vid, aud_file, srt_file, out_vid, enable_broll, style)
+        return {"success": True, "job_id": job_id, "message": "Processing started in background"}
     except Exception as e:
+        job_states[job_id] = {"step": "Failed", "progress": 0}
         raise HTTPException(status_code=500, detail=str(e))
 
 class UrlRequest(BaseModel):
