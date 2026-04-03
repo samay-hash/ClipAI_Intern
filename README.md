@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 <!-- Animated Header Banner -->
 <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:16a34a,100:22d3ee&height=220&section=header&text=ClipAI&fontSize=80&fontColor=ffffff&fontAlignY=35&desc=Generative%20AI%20B-Roll%20Video%20Engine&descSize=18&descAlignY=55&animation=fadeIn" width="100%"/>
@@ -370,4 +370,3 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 [![GitHub](https://img.shields.io/badge/GitHub-samay--hash-181717?style=for-the-badge&logo=github)](https://github.com/samay-hash)
 
 </div>
-]]>
