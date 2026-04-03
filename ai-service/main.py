@@ -16,7 +16,7 @@ import cloudinary.uploader
 import cloudinary.api
 from groq import Groq
 
-# Load Keys
+
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
@@ -76,13 +76,12 @@ def get_broll_keywords(segments: list, style: str = "cinematic") -> list:
     full_text = " ".join([seg["text"] if isinstance(seg, dict) else getattr(seg, "text") for seg in segments])
     
     prompt = f"""
-    You are an AI video editor that suggests Generative AI Image Prompts.
-    Analyze the transcript below and dynamically identify the most contextually relevant moments where a visual change (B-roll) is necessary (e.g. subject changes, vivid descriptions).
-    Extract between 1 to 4 moments depending strictly on the transcript's length and visual density.
-    For each moment, provide a "highly detailed, {style}, photorealistic prompt" (max 15 words) to use on an AI Image Generator.
-    Determine the exact start and end time (in seconds) to insert this B-roll so it mathematically aligns with the spoken words. Make each clip last exactly 3.5 seconds.
-    Return ONLY a raw valid JSON array. Example: [{{"prompt": "A {style} 4k highly detailed shot of a glowing laptop screen", "start_time": 2.0, "end_time": 5.5}}]
-    Here is the transcript:
+    You are an AI video editor that suggests B-roll video search keywords.
+    Analyze the transcript below and identify the most contextually relevant moments where a visual change (B-roll) is necessary.
+    Extract between 1 to 4 moments depending strictly on the transcript's length.
+    For each moment, provide a very concise 1-3 word video search keyword (e.g., "dense forest", "coding room", "city sunset").
+    Determine the exact start and end time (in seconds) to insert this B-roll so it aligns with the spoken words. Make each clip last exactly 3.0 to 4.0 seconds.
+    Return ONLY a raw valid JSON array. Example: [{{"keyword": "dense forest", "start_time": 2.0, "end_time": 5.5}}]
     {full_text}
     """
     
@@ -121,6 +120,43 @@ def generate_ai_broll_image(prompt: str, download_path: str) -> bool:
     except Exception as e:
         print(f"HF Error: {e}")
         return False
+def fetch_pexels_video(keyword: str, download_path: str) -> bool:
+    PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+    if not PEXELS_API_KEY:
+        print("Pexels API Key required for fetching videos!")
+        return False
+        
+    def _search(q):
+        url = f"https://api.pexels.com/videos/search?query={q}&per_page=1&orientation=landscape"
+        return requests.get(url, headers={"Authorization": PEXELS_API_KEY}, timeout=20).json()
+
+    try:
+        response = _search(keyword)
+        videos = response.get("videos")
+        
+        # Fallback to single word if multi-word search yields 0 videos
+        if not videos and " " in keyword:
+            fallback_word = keyword.split()[-1]
+            print(f"Pexels found 0 for '{keyword}', retrying with '{fallback_word}'...")
+            response = _search(fallback_word)
+            videos = response.get("videos")
+            
+        if videos and len(videos) > 0:
+            video_files = videos[0].get("video_files", [])
+            hd_files = [v for v in video_files if v["quality"] == "hd" and v.get("width", 0) >= 1920]
+            selected_file = hd_files[0]["link"] if hd_files else video_files[0]["link"]
+            
+            vid_res = requests.get(selected_file, stream=True)
+            with open(download_path, "wb") as f:
+                for chunk in vid_res.iter_content(chunk_size=1024*1024):
+                    if chunk: f.write(chunk)
+            return True
+        else:
+            print(f"No Pexels videos found for '{keyword}'")
+            return False
+    except Exception as e:
+        print(f"Pexels Error: {e}")
+        return False
 
 def generate_srt(segments: list, srt_path: str) -> bool:
     if not segments: return False
@@ -139,6 +175,29 @@ def generate_srt(segments: list, srt_path: str) -> bool:
         return True
     except: return False
 
+def download_bgm(output_path: str, style="cinematic"):
+    # Extremely soft, relaxing, ambient background tracks
+    urls = {
+        "cinematic": "https://cdn.pixabay.com/download/audio/2022/02/07/audio_b04ec8d4ac.mp3", # Ambient Relaxing
+        "vlog": "https://cdn.pixabay.com/download/audio/2021/08/04/audio_0625c1539c.mp3"     # Chill piano
+    }
+    target_url = urls.get(style, urls["cinematic"])
+    
+    # If the user previously downloaded the heavy music, remove it so it downloads the new one
+    if os.path.exists(output_path):
+        os.remove(output_path)
+        
+    try:
+        res = requests.get(target_url, verify=False, timeout=20)
+        if res.status_code == 200:
+            with open(output_path, "wb") as f:
+                f.write(res.content)
+            return True
+    except Exception as e:
+        print("Failed to download BGM:", e)
+        return False
+    return True
+
 def get_video_resolution(video_path: str) -> str:
     try:
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", video_path]
@@ -147,9 +206,15 @@ def get_video_resolution(video_path: str) -> str:
         print(f"Failed to get resolution: {e}")
         return "1920x1080" # safe fallback
 
-def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_path: str) -> bool:
+def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_path: str, bgm_path: str = None) -> bool:
     try:
         inputs = ["-i", main_video]
+        if bgm_path and os.path.exists(bgm_path):
+            inputs.extend(["-stream_loop", "-1", "-i", bgm_path])
+            bgm_idx = 1
+        else:
+            bgm_idx = -1
+            
         filter_complex = []
         overlay_chain = "[0:v]"
         
@@ -170,7 +235,8 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             else:
                 inputs.extend(["-i", clip['path']])
                 
-            vid_idx = i + 1
+            # If BGM is used, our videos start at input 2, otherwise 1
+            vid_idx = i + (2 if bgm_idx != -1 else 1)
             start_t, end_t = clip['start'], clip['end']
             
             # Scale B-roll to exactly match the target resolution, padding/cropping dynamically if necessary
@@ -196,9 +262,6 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             duration = float(subprocess.check_output(dur_cmd).decode().strip())
         except:
             pass
-
-        # Add subtitles and cool lighting flash effects as the last filter
-        # Soft cinematic fade from white 
         fade_filter = f",fade=t=in:st=0:d=1:color=white,fade=t=out:st={duration-1}:d=1:color=black" if duration > 3.0 else ""
         
         if os.path.exists(srt_path):
@@ -209,8 +272,16 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             filter_complex.append(f"{overlay_chain}format=yuv420p{fade_filter}[vout]")
              
         fc_str = "".join(filter_complex)
+        
+        audio_map = []
+        if bgm_idx != -1:
+            fc_str += f";[0:a]volume=1.0[a1];[{bgm_idx}:a]volume=0.06[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            audio_map = ["-map", "[aout]"]
+        else:
+            audio_map = ["-map", "0:a?"]
+            
         print(f"FFmpeg filter: {fc_str[:300]}...")
-        cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", fc_str, "-map", "[vout]", "-map", "0:a?", "-c:a", "aac", "-c:v", "libx264", "-preset", "fast", output_path]
+        cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", fc_str, "-map", "[vout]"] + audio_map + ["-c:a", "aac", "-c:v", "libx264", "-preset", "fast", output_path]
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
             print(f"FFmpeg FAILED stderr: {result.stderr.decode()[-800:]}")
@@ -249,39 +320,37 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 kw = br.get("prompt") or br.get("keyword") 
                 if not kw: continue
                 
-                job_states[job_id] = {"step": f"Synthesizing Frame {i+1}...", "progress": 50 + (i*5)}
-                p = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
-                print(f"[{job_id}] 4. Generating AI B-Roll Image for '{kw[:30]}...'")
-                if generate_ai_broll_image(kw, p):
-                    downloaded.append({"path": p, "start": br.get("start_time"), "end": br.get("end_time")})
+                job_states[job_id] = {"step": f"Fetching B-Roll {i+1}...", "progress": 50 + (i*5)}
+                p_vid = str(TEMP_DIR / f"{job_id}_br_{i}.mp4")
+                p_img = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
+                
+                print(f"[{job_id}] 4a. Fetching Pexels B-Roll Video for '{kw[:30]}...'")
+                if fetch_pexels_video(kw, p_vid):
+                    downloaded.append({"path": p_vid, "start": br.get("start_time"), "end": br.get("end_time")})
+                else:
+                    print(f"[{job_id}] 4b. Pexels failing... Falling back to AI Image Generator for '{kw[:30]}...'")
+                    job_states[job_id] = {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)}
+                    enhanced_prompt = f"A {style} highly detailed 4k cinematic shot of {kw}, photorealistic, stunning"
+                    if generate_ai_broll_image(enhanced_prompt, p_img):
+                        downloaded.append({"path": p_img, "start": br.get("start_time"), "end": br.get("end_time")})
                 
         job_states[job_id] = {"step": "Designing Subtitles...", "progress": 70}
         print(f"[{job_id}] 5. Designing SRT Subtitles...")
         generate_srt(segments, srt_file)
         
-        job_states[job_id] = {"step": "Rendering Magical Video...", "progress": 85}
-        print(f"[{job_id}] 6. Rendering magical final video...")
+        job_states[job_id] = {"step": "Applying Audio Mix...", "progress": 85}
+        bgm_path = str(TEMP_DIR / f"bgm_{style}.mp3")
+        print(f"[{job_id}] 6. Downloading Background Music...")
+        download_bgm(bgm_path, style)
+        
+        job_states[job_id] = {"step": "Rendering Magical Video...", "progress": 90}
+        print(f"[{job_id}] 7. Rendering final magical video with FFmpeg...")
         if downloaded:
-            success = burn_complex_video(in_vid, srt_file, downloaded, out_vid)
+            success = burn_complex_video(in_vid, srt_file, downloaded, out_vid, bgm_path)
         else:
-            # Fallback: just burn subtitles without B-roll, with cinematic fade
-            duration = 0.0
-            try:
-                duration = float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", in_vid]).decode().strip())
-            except: pass
+            # Fallback: just burn subtitles & bgm
+            success = burn_complex_video(in_vid, srt_file, [], out_vid, bgm_path)
             
-            fade_filter = f"fade=t=in:st=0:d=1:color=white,fade=t=out:st={max(0, duration-1)}:d=1:color=black" if duration > 3.0 else ""
-            srt_filter = f"subtitles={srt_file}" if os.path.exists(srt_file) else ""
-            
-            vf_filters = ",".join(filter(bool, [srt_filter, fade_filter]))
-            cmd = ["ffmpeg", "-y", "-i", in_vid]
-            if vf_filters:
-                cmd += ["-vf", vf_filters]
-            cmd += ["-c:a", "copy", "-c:v", "libx264", "-preset", "fast", out_vid]
-            result = subprocess.run(cmd, capture_output=True)
-            if result.returncode != 0:
-                print(f"FFmpeg stderr: {result.stderr.decode()[-500:]}")
-            success = result.returncode == 0 
         if not success: raise Exception("FFmpeg Rendering Failed")
         
         # Upload final video to Cloudinary
