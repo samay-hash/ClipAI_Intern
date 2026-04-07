@@ -5,19 +5,24 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Hugging Face Spaces require running as a non-root user
+RUN useradd -m -u 1000 user
+USER user
+ENV PATH="/home/user/.local/bin:$PATH"
+
 # Set working directory
 WORKDIR /app
 
 # Copy requirements and install them
-COPY requirements.txt .
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application
-COPY . .
+COPY --chown=user . .
 
 # Create necessary directories
 RUN mkdir -p uploads outputs temp
 
-# Render uses PORT env variable (default 10000)
-EXPOSE 10000
-CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
+# HF uses 7860
+EXPOSE 7860
+CMD uvicorn main:app --host 0.0.0.0 --port 7860

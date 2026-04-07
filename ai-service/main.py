@@ -14,7 +14,6 @@ import yt_dlp
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
-
 from groq import Groq
 from pymongo import MongoClient
 
@@ -78,35 +77,142 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
         return subprocess.run(cmd, capture_output=True).returncode == 0
     except: return False
 
-def transcribe_audio_groq(audio_path: str) -> list:
+def urdu_to_devanagari(text: str) -> str:
+    """Convert Urdu/Nastaliq script to approximate Devanagari transliteration."""
+    # If no Arabic/Urdu unicode chars, return as-is
+    if not any('\u0600' <= c <= '\u06FF' for c in text):
+        return text
+    # Urdu → Devanagari character map
+    mapping = {
+        'ا': 'अ', 'آ': 'आ', 'ب': 'ब', 'پ': 'प', 'ت': 'त', 'ٹ': 'ट',
+        'ث': 'स', 'ج': 'ज', 'چ': 'च', 'ح': 'ह', 'خ': 'ख', 'د': 'द',
+        'ڈ': 'ड', 'ذ': 'ज़', 'ر': 'र', 'ڑ': 'ड़', 'ز': 'ज़', 'ژ': 'झ',
+        'س': 'स', 'ش': 'श', 'ص': 'स', 'ض': 'ज़', 'ط': 'त', 'ظ': 'ज़',
+        'ع': 'अ', 'غ': 'ग़', 'ف': 'फ', 'ق': 'क', 'ک': 'क', 'گ': 'ग',
+        'ل': 'ल', 'م': 'म', 'ن': 'न', 'ں': 'न', 'و': 'व', 'ہ': 'ह',
+        'ھ': 'ह', 'ی': 'य', 'ے': 'े', 'ئ': 'य', 'ء': '', 'ؤ': 'व',
+        'ِ': 'ि', 'َ': 'ा', 'ُ': 'ु', 'ّ': '', 'ْ': '', '۔': '।',
+    }
+    result = ""
+    for char in text:
+        result += mapping.get(char, char)
+    return result
+
+def transcribe_audio_groq(audio_path: str, language: str = None) -> list:
     try:
         if not groq_client: return []
+        lang_map = {
+            "english": "en", "hindi": "hi", "spanish": "es",
+            "french": "fr", "german": "de", "portuguese": "pt",
+            "arabic": "ar", "japanese": "ja", "korean": "ko",
+            "chinese": "zh", "russian": "ru", "auto": None
+        }
+        whisper_lang = lang_map.get((language or "").lower(), None)
+        
+        # Use better (non-turbo) model for Hindi — turbo confuses Hindi/Urdu script
+        model = "whisper-large-v3" if whisper_lang == "hi" else "whisper-large-v3-turbo"
+        
+        extra = {}
+        if whisper_lang:
+            extra["language"] = whisper_lang
+        if whisper_lang == "hi":
+            extra["prompt"] = "हिंदी देवनागरी लिपि में लिखें।"
+        
         with open(audio_path, "rb") as f:
             transcription = groq_client.audio.transcriptions.create(
                 file=(os.path.basename(audio_path), f.read()),
-                model="whisper-large-v3-turbo",
-                response_format="verbose_json"
+                model=model,
+                response_format="verbose_json",
+                **extra
             )
-        return transcription.segments if hasattr(transcription, "segments") else []
+        
+        segments = transcription.segments if hasattr(transcription, "segments") else []
+        
+        # Post-process: if Hindi selected but Urdu script came out, convert it
+        if whisper_lang == "hi" and segments:
+            for seg in segments:
+                if isinstance(seg, dict):
+                    seg["text"] = urdu_to_devanagari(seg.get("text", ""))
+                else:
+                    try:
+                        seg.text = urdu_to_devanagari(getattr(seg, "text", ""))
+                    except:
+                        pass
+        
+        return segments
     except Exception as e:
         print(f"Transcription error: {e}")
         return []
 
-def get_broll_keywords(segments: list, style: str = "cinematic") -> list:
-    if not segments or not groq_client: return []
-    full_text = " ".join([seg["text"] if isinstance(seg, dict) else getattr(seg, "text") for seg in segments])
+
+def validate_broll_timestamps(brolls: list, segments: list, video_duration: float = None) -> list:
+    """Validate and fix B-roll timestamps against real Whisper segment timings."""
+    if not segments: return brolls
     
-    prompt = f"""
-    You are an expert AI video editor. Your task is to deeply analyze the transcript and identify EVERY key point, important concept, or visual change.
-    Do NOT limit yourself. Extract as many B-roll moments as needed to make the video engaging (feel free to extract 5 to 15+ moments depending on transcript length).
-    For every key point, provide a highly refined and concise 1-3 word video search keyword (e.g., "coding laptop", "fast car", "happy team").
-    Determine exact start_time and end_time (in seconds) to insert this B-roll so it matches exactly when the subject is spoken. Each clip must last exactly 3.5 seconds.
-    Ensure the times do not overlap heavily and flow naturally.
-    Return ONLY a valid JSON object with a single key "brolls" containing an array of objects.
-    Example: {{"brolls": [{{"keyword": "coding laptop", "start_time": 2.0, "end_time": 5.5}}, {{"keyword": "happy team", "start_time": 6.0, "end_time": 9.5}}]}}
-    Transcript:
-    {full_text}
-    """
+    # Build a map of real spoken-word timestamps from Whisper
+    seg_times = []
+    for seg in segments:
+        st = seg.get("start") if isinstance(seg, dict) else getattr(seg, "start", 0)
+        en = seg.get("end") if isinstance(seg, dict) else getattr(seg, "end", 0)
+        seg_times.append((float(st), float(en)))
+    
+    max_time = max(t[1] for t in seg_times) if seg_times else 60.0
+    if video_duration and video_duration > 0:
+        max_time = min(max_time, video_duration)
+    
+    validated = []
+    last_end = 0.0
+    for br in brolls:
+        start = float(br.get("start_time", 0))
+        end = float(br.get("end_time", start + 3.5))
+        duration = end - start
+        
+        # Clamp duration between 2.5s and 5.0s
+        duration = max(2.5, min(5.0, duration))
+        
+        # Ensure no overlap with previous B-roll
+        if start < last_end + 0.5:
+            start = last_end + 0.5
+        
+        # Don't exceed video length
+        end = start + duration
+        if end > max_time:
+            break
+        
+        br["start_time"] = round(start, 2)
+        br["end_time"] = round(end, 2)
+        last_end = end
+        validated.append(br)
+    
+    return validated
+
+def get_broll_keywords(segments: list, style: str = "cinematic", max_broll: int = 8) -> list:
+    if not segments or not groq_client: return []
+    
+    # Build timed transcript so LLaMA knows EXACT word timings
+    timed_lines = []
+    for seg in segments:
+        st = seg.get("start") if isinstance(seg, dict) else getattr(seg, "start", 0)
+        en = seg.get("end") if isinstance(seg, dict) else getattr(seg, "end", 0)
+        txt = seg.get("text") if isinstance(seg, dict) else getattr(seg, "text", "")
+        timed_lines.append(f"[{float(st):.1f}s - {float(en):.1f}s]: {txt.strip()}")
+    
+    timed_transcript = "\n".join(timed_lines)
+    
+    prompt = f"""You are an expert AI video editor. Analyze this TIMED transcript and select exactly {max_broll} key visual moments for B-roll insertion.
+
+RULES:
+1. Each B-roll MUST align with the EXACT timestamp where that topic is spoken (use the timestamps provided).
+2. Duration: each clip should be 2.5 to 4.5 seconds long (vary naturally).
+3. Keywords must be 1-3 word cinematic search terms (e.g. "coding laptop", "ocean waves", "city skyline").
+4. No two B-rolls should overlap. Maintain at least 0.5s gap between them.
+5. Spread B-rolls evenly across the video — don't cluster them all at the start.
+6. Return ONLY a JSON object.
+
+Example: {{"brolls": [{{"keyword": "coding laptop", "start_time": 2.0, "end_time": 5.5, "reason": "Speaker mentions programming"}}, ...]}}
+
+Timed Transcript:
+{timed_transcript}"""
     
     try:
         response = groq_client.chat.completions.create(
@@ -117,7 +223,13 @@ def get_broll_keywords(segments: list, style: str = "cinematic") -> list:
         )
         content = response.choices[0].message.content
         data = json.loads(content)
-        return data.get("brolls", [])
+        brolls = data.get("brolls", [])
+        
+        # Validate timestamps against real Whisper timings
+        brolls = validate_broll_timestamps(brolls, segments)
+        
+        # Limit to max requested
+        return brolls[:max_broll]
     except Exception as e:
         print(f"B-roll generation error: {e}")
         return []
@@ -169,15 +281,12 @@ def fetch_pexels_video(keyword: str, download_path: str) -> bool:
     if not PEXELS_API_KEY:
         print("Pexels API Key required for fetching videos!")
         return False
-        
     def _search(q):
         url = f"https://api.pexels.com/videos/search?query={q}&per_page=1&orientation=landscape"
         return requests.get(url, headers={"Authorization": PEXELS_API_KEY}, timeout=20).json()
-
     try:
         response = _search(keyword)
         videos = response.get("videos")
-        
         # Fallback to single word if multi-word search yields 0 videos
         if not videos and " " in keyword:
             fallback_word = keyword.split()[-1]
@@ -313,6 +422,8 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             # Use PTS shifting so the clip is aligned properly in time. 
             # Fades are also mapped to the exact start/end time of the overlay.
             setpts_filter = f"setpts=PTS-STARTPTS+{start_t}/TB"
+            # yuva420p for intermediate processing (alpha needed for smooth overlay fading)
+            # Final output converts to yuv420p via -pix_fmt flag for mobile compatibility
             fade_fx = f"format=yuva420p,fade=t=in:st={start_t}:d=0.5:alpha=1,fade=t=out:st={max(0, end_t-0.5)}:d=0.5:alpha=1"
             
             if is_image:
@@ -331,8 +442,6 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
                 f"{overlay_chain}[v{vid_idx}cropped]overlay=enable='between(t,{start_t},{end_t})':eof_action=pass{new_overlay};"
             )
             overlay_chain = new_overlay
-        
-        # Get video duration for fade effects
         duration = 0.0
         try:
             dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", main_video]
@@ -344,7 +453,7 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
         if os.path.exists(srt_path):
             escaped_srt = srt_path.replace("\\", "/").replace(":", "\\\\:")
             style = "FontName=Arial,FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,Shadow=1,MarginV=30"
-            filter_complex.append(f"{overlay_chain}subtitles='{escaped_srt}':force_style='{style}'{fade_filter}[vout]")
+            filter_complex.append(f"{overlay_chain}format=yuv420p,subtitles='{escaped_srt}':force_style='{style}'{fade_filter}[vout]")
         else:
             filter_complex.append(f"{overlay_chain}format=yuv420p{fade_filter}[vout]")
              
@@ -358,7 +467,21 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             audio_map = ["-map", "0:a?"]
             
         print(f"FFmpeg filter: {fc_str[:300]}...")
-        cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", fc_str, "-map", "[vout]"] + audio_map + ["-c:a", "aac", "-c:v", "libx264", "-preset", "fast", output_path]
+        cmd = [
+            "ffmpeg", "-y"
+        ] + inputs + [
+            "-filter_complex", fc_str,
+            "-map", "[vout]"
+        ] + audio_map + [
+            "-c:v", "libx264",
+            "-profile:v", "main",       # Mobile compatible H.264 profile
+            "-pix_fmt", "yuv420p",       # Strips alpha — universal mobile support
+            "-movflags", "+faststart",   # Allows streaming playback on mobile
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-preset", "fast",
+            output_path
+        ]
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
             print(f"FFmpeg FAILED stderr: {result.stderr.decode()[-800:]}")
@@ -376,22 +499,71 @@ async def get_status(job_id: str):
 @app.get("/health")
 async def health_check(): return {"status": "ok"}
 
-def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic"):
+def analyze_quality(segments: list, brolls_used: list, downloaded: list) -> dict:
+    """Use LLaMA to analyze output quality (FREE — no Vision API needed)."""
+    if not groq_client: return {"quality_score": 70, "analysis": "AI analysis unavailable", "suggestions": []}
+    
+    full_text = " ".join([seg.get("text") if isinstance(seg, dict) else getattr(seg, "text", "") for seg in segments[:20]])
+    
+    broll_summary = []
+    for i, br in enumerate(brolls_used):
+        kw = br.get("keyword", "unknown")
+        st = br.get("start_time", 0)
+        en = br.get("end_time", 0)
+        fetched = i < len(downloaded)
+        broll_summary.append(f"  B-Roll {i+1}: '{kw}' at {st}s-{en}s {'✅ fetched' if fetched else '❌ missing'}")
+    
+    prompt = f"""You are a professional video quality analyst. Analyze this video edit and give a quality report.
+
+Transcript (first 500 chars): {full_text[:500]}
+
+B-Roll Placements:
+{chr(10).join(broll_summary)}
+
+Total B-rolls requested: {len(brolls_used)}
+Total B-rolls successfully fetched: {len(downloaded)}
+Total transcript segments: {len(segments)}
+
+Give a JSON response with:
+- "quality_score": 0-100 integer
+- "broll_relevance": short assessment of B-roll keyword relevance
+- "timing_quality": assessment of B-roll placement timing
+- "suggestions": array of 2-3 short improvement suggestions
+- "overall": 1 sentence summary"""
+    
     try:
-        update_job_state(job_id, {"step": "Extracting Audio...", "progress": 15})
+        response = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.3-70b-versatile",
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"Quality analysis error: {e}")
+        return {"quality_score": 75, "analysis": "Analysis failed", "suggestions": []}
+
+def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool = True, style: str = "cinematic", language: str = None, caption_style: str = "clean", max_broll: int = 8):
+    try:
+        update_job_state(job_id, {"step": "Extracting Audio...", "progress": 10})
         print(f"[{job_id}] 1. Extracting audio...")
         extract_audio(in_vid, aud_file)
             
-        update_job_state(job_id, {"step": "Transcribing with AI...", "progress": 30})
+        update_job_state(job_id, {"step": "Transcribing with AI...", "progress": 20})
         print(f"[{job_id}] 2. Transcribing with fast Groq API...")
-        segments = transcribe_audio_groq(aud_file)
+        segments = transcribe_audio_groq(aud_file, language=language)
         seg_count = len(segments) if segments else 0
             
         downloaded = []
+        brolls_used = []
         if enable_broll:
-            update_job_state(job_id, {"step": f"Generating {style.title()} Prompts...", "progress": 45})
-            print(f"[{job_id}] 3. Detecting B-Roll keywords with LLaMA...")
-            brolls = get_broll_keywords(segments, style)
+            update_job_state(job_id, {"step": f"Generating {style.title()} Prompts ({max_broll} moments)...", "progress": 30})
+            print(f"[{job_id}] 3. Detecting {max_broll} B-Roll keywords with LLaMA...")
+            brolls = get_broll_keywords(segments, style, max_broll=max_broll)
+            brolls_used = brolls  # Store for quality analysis
+            
+            # Calculate progress per B-roll so it's evenly distributed 30-70%
+            progress_per_broll = 40 / max(len(brolls), 1)
             
             for i, br in enumerate(brolls):
                 kw = br.get("prompt") or br.get("keyword") 
@@ -400,7 +572,15 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 start_t = float(br.get("start_time", 0))
                 end_t = float(br.get("end_time", start_t + 3.5))
                 
-                update_job_state(job_id, {"step": f"Fetching B-Roll {i+1}...", "progress": 50 + (i*5)})
+                current_progress = int(30 + (i * progress_per_broll))
+                update_job_state(job_id, {
+                    "step": f"Fetching B-Roll {i+1}/{len(brolls)}...",
+                    "progress": current_progress,
+                    "broll_moments": [
+                        {"keyword": b.get("keyword", ""), "start": b.get("start_time", 0), "end": b.get("end_time", 0), "reason": b.get("reason", "")}
+                        for b in brolls
+                    ]
+                })
                 p_vid = str(TEMP_DIR / f"{job_id}_br_{i}.mp4")
                 p_img = str(TEMP_DIR / f"{job_id}_br_{i}.jpg")
                 
@@ -413,44 +593,50 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                         downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                     else:
                         print(f"[{job_id}] 4c. Image search failed! Generating HF AI fallback for '{kw[:30]}...'")
-                        update_job_state(job_id, {"step": f"Synthesizing Fallback B-Roll {i+1}...", "progress": 52 + (i*5)})
+                        update_job_state(job_id, {"step": f"Synthesizing AI B-Roll {i+1}/{len(brolls)}...", "progress": current_progress + 2})
                         enhanced_prompt = f"A {style} highly detailed 4k cinematic shot of {kw}, photorealistic, stunning"
                         
-                        # 3. Try Hugging Face first
                         if generate_ai_broll_image_hf(enhanced_prompt, p_img):
                             downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                         else:
                             print(f"[{job_id}] 4d. HF Failed! Falling back to Pollinations AI for '{kw}'")
-                            
-                            # 4. Try Pollinations if HF fails
                             if generate_ai_broll_image_pollinations(enhanced_prompt, p_img):
                                 downloaded.append({"path": p_img, "start": start_t, "end": end_t})
                 
-        update_job_state(job_id, {"step": "Designing Subtitles...", "progress": 70})
-        print(f"[{job_id}] 5. Designing SRT Subtitles...")
-        generate_srt(segments, srt_file)
+        update_job_state(job_id, {"step": "Designing Subtitles...", "progress": 72})
+        if caption_style != "none":
+            print(f"[{job_id}] 5. Designing SRT Subtitles...")
+            generate_srt(segments, srt_file)
+        else:
+            print(f"[{job_id}] 5. Captions disabled — skipping SRT generation.")
+            srt_file = ""
         
-        update_job_state(job_id, {"step": "Applying Audio Mix...", "progress": 85})
+        update_job_state(job_id, {"step": "Applying Audio Mix...", "progress": 78})
         bgm_path = str(TEMP_DIR / f"bgm_{style}.mp3")
         print(f"[{job_id}] 6. Downloading Background Music...")
         download_bgm(bgm_path, style)
         
-        update_job_state(job_id, {"step": "Rendering Magical Video...", "progress": 90})
-        print(f"[{job_id}] 7. Rendering final magical video with FFmpeg...")
+        update_job_state(job_id, {"step": "Rendering Final Video...", "progress": 82})
+        print(f"[{job_id}] 7. Rendering final video with FFmpeg...")
         if downloaded:
             success = burn_complex_video(in_vid, srt_file, downloaded, out_vid, bgm_path)
         else:
-            # Fallback: just burn subtitles & bgm
             success = burn_complex_video(in_vid, srt_file, [], out_vid, bgm_path)
             
         if not success: raise Exception("FFmpeg Rendering Failed")
         
+        # AI Quality Analysis (FREE — uses LLaMA)
+        update_job_state(job_id, {"step": "AI Quality Analysis...", "progress": 90})
+        print(f"[{job_id}] 8. Running AI quality analysis...")
+        quality_report = analyze_quality(segments, brolls_used, downloaded)
+        print(f"[{job_id}] 📊 Quality Score: {quality_report.get('quality_score', 'N/A')}")
+        
         # Upload final video to Cloudinary
         update_job_state(job_id, {"step": "Uploading to Cloud...", "progress": 95})
-        video_url = f"/api/video/{job_id}"  # fallback local URL
+        video_url = f"/api/video/{job_id}"
         if CLOUDINARY_CLOUD_NAME:
             try:
-                print(f"[{job_id}] 7. Uploading final video to Cloudinary...")
+                print(f"[{job_id}] 9. Uploading final video to Cloudinary...")
                 res = cloudinary.uploader.upload_large(
                     out_vid, 
                     resource_type="video",
@@ -462,6 +648,17 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
             except Exception as e:
                 print(f"[{job_id}] Cloudinary upload failed, using local: {e}")
         
+        # Build B-roll moments data for frontend
+        broll_moments = []
+        for i, br in enumerate(brolls_used):
+            broll_moments.append({
+                "keyword": br.get("keyword", ""),
+                "start": br.get("start_time", 0),
+                "end": br.get("end_time", 0),
+                "reason": br.get("reason", ""),
+                "fetched": i < len(downloaded)
+            })
+        
         update_job_state(job_id, {
             "step": "Complete!", 
             "progress": 100, 
@@ -469,7 +666,9 @@ def run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid, enable_broll: bool
                 "success": True, 
                 "job_id": job_id, 
                 "video_url": video_url, 
-                "transcript_segments": seg_count
+                "transcript_segments": seg_count,
+                "broll_moments": broll_moments,
+                "quality_report": quality_report
             }
         })
         print(f"[{job_id}] ✅ Video is Ready!")
@@ -482,7 +681,10 @@ async def process_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...), 
     enable_broll: bool = Form(True), 
-    style: str = Form("cinematic")
+    style: str = Form("cinematic"),
+    language: str = Form("auto"),
+    caption_style: str = Form("clean"),
+    max_broll: int = Form(8)
 ):
     job_id = str(uuid.uuid4())[:8]
     update_job_state(job_id, {"step": "Initializing...", "progress": 5})
@@ -492,8 +694,8 @@ async def process_video(
     try:
         content = await file.read()
         with open(in_vid, "wb") as f: f.write(content)
-        # Run heavy pipeline processing async so we can poll status later!
-        background_tasks.add_task(run_pipeline, job_id, in_vid, aud_file, srt_file, out_vid, enable_broll, style)
+        print(f"[{job_id}] 🎬 caption_style='{caption_style}', max_broll={max_broll}")
+        background_tasks.add_task(run_pipeline, job_id, in_vid, aud_file, srt_file, out_vid, enable_broll, style, language, caption_style, max_broll)
         return {"success": True, "job_id": job_id, "message": "Processing started in background"}
     except Exception as e:
         update_job_state(job_id, {"step": "Failed", "progress": 0})

@@ -56,6 +56,12 @@ app.post("/api/upload", upload.single("video"), async (req, res) => {
     formData.append("file", fs.createReadStream(req.file.path));
     formData.append("enable_broll", req.body.enableBroll === 'false' ? 'False' : 'True');
     formData.append("style", req.body.style || 'cinematic');
+    formData.append("language", req.body.language || 'auto');
+    const captionStyle = req.body.captionStyle || 'clean';
+    const maxBroll = req.body.maxBroll || '8';
+    console.log(`🎬 caption_style="${captionStyle}", max_broll=${maxBroll}`);
+    formData.append("caption_style", captionStyle);
+    formData.append("max_broll", maxBroll);
 
     const aiResponse = await fetch(`${AI_SERVICE_URL}/process`, {
       method: "POST",
