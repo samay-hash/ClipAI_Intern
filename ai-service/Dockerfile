@@ -5,13 +5,13 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Set working directory and permissions first
+WORKDIR /app
+
 # Hugging Face Spaces require running as a non-root user
-RUN useradd -m -u 1000 user
+RUN useradd -m -u 1000 user && chown -R user:user /app
 USER user
 ENV PATH="/home/user/.local/bin:$PATH"
-
-# Set working directory
-WORKDIR /app
 
 # Copy requirements and install them
 COPY --chown=user requirements.txt .
