@@ -2,9 +2,8 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// Browser should call same-origin /api; Next.js rewrite forwards to backend container.
-const API_URL =
-  (typeof window === "undefined" ? process.env.NEXT_PUBLIC_API_URL || "http://backend:5001" : "").replace(/\/$/, "");
+// Always use same-origin API path from browser to avoid public DNS resolution issues.
+const API_URL = "";
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
