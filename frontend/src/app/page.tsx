@@ -2,8 +2,8 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// Always use same-origin API path from browser to avoid public DNS resolution issues.
-const API_URL = "";
+// On Amplify, uploads must go directly to backend (avoids Amplify/CloudFront body limits).
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
