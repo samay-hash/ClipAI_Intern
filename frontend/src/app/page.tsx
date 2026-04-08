@@ -2,7 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001").replace(/\/$/, "");
+// Browser should call same-origin /api; Next.js rewrite forwards to backend container.
+const API_URL =
+  (typeof window === "undefined" ? process.env.NEXT_PUBLIC_API_URL || "http://backend:5001" : "").replace(/\/$/, "");
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
