@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001").replace(/\/$/, "");
+const API_URL = "";
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
