@@ -73,7 +73,7 @@ for d in [UPLOAD_DIR, OUTPUT_DIR, TEMP_DIR]:
 def extract_audio(video_path: str, audio_path: str) -> bool:
     try:
         # Extract audio as highly compressed MP3 to avoid Groq's 25MB limit
-        cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "libmp3lame", "-q:a", "5", "-ar", "16000", "-ac", "1", audio_path, "-y"]
+        cmd = ["ffmpeg", "-i", video_path, "-threads", "1", "-vn", "-acodec", "libmp3lame", "-q:a", "5", "-ar", "16000", "-ac", "1", audio_path, "-y"]
         return subprocess.run(cmd, capture_output=True).returncode == 0
     except: return False
 
@@ -479,7 +479,8 @@ def burn_complex_video(main_video: str, srt_path: str, broll_info: list, output_
             "-movflags", "+faststart",   # Allows streaming playback on mobile
             "-c:a", "aac",
             "-b:a", "128k",
-            "-preset", "fast",
+            "-threads", "1",             # Limit CPU/Memory usage
+            "-preset", "ultrafast",      # Faster encoding, lower memory footprint
             output_path
         ]
         result = subprocess.run(cmd, capture_output=True)

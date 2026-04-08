@@ -1,0 +1,39 @@
+services:
+  ai-service:
+    build:
+      context: ./ai-service
+    container_name: clipai-ai-service
+    restart: unless-stopped
+    env_file:
+      - ./ai-service/.env
+    ports:
+      - "8000:7860"
+
+  backend:
+    build:
+      context: ./backend
+    container_name: clipai-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      - PORT=5001
+      - AI_SERVICE_URL=http://ai-service:7860
+    depends_on:
+      - ai-service
+    ports:
+      - "5001:5001"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: clipai-frontend
+    restart: unless-stopped
+    env_file:
+      - ./frontend/.env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:5001
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
