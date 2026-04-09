@@ -1,8 +1,9 @@
 FROM python:3.10-slim
 
-# Install system dependencies including FFmpeg
+# Install system dependencies including FFmpeg and Hindi Fonts for Subtitles
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    fonts-noto fonts-indic \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory and permissions first

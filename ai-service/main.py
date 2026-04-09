@@ -982,9 +982,9 @@ def burn_complex_video(
         if os.path.exists(srt_path):
             escaped_srt = srt_path.replace("\\", "/").replace(":", "\\\\:")
             style = (
-                "FontName=Noto Sans,FontSize=28,PrimaryColour=&H00FFFFFF,"
-                "OutlineColour=&H00000000,BackColour=&H00000000,Bold=0,Outline=1,"
-                "Shadow=0,MarginV=30,Alignment=2"
+                "FontName=Noto Sans Devanagari,FontSize=24,PrimaryColour=&H0000FFFF,"
+                "OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,Outline=2,"
+                "Shadow=2,MarginV=40,Alignment=2,BorderStyle=1"
             )
             filter_complex.append(
                 f"{overlay_chain}format=yuv420p,subtitles='{escaped_srt}':force_style='{style}'{fade_filter}[vout]"
