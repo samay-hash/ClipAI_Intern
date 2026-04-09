@@ -2,10 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// Video uploads go DIRECTLY to backend to bypass CloudFront 413 body size limit
-const UPLOAD_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
-// Status/polling uses relative path (Next.js proxy) to avoid Mixed Content errors
-const API_URL = "";
+// sslip.io HTTPS URL bypasses CloudFront AND avoids Mixed Content errors
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+const UPLOAD_URL = API_URL;
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
