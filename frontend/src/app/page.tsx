@@ -2,8 +2,8 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// On Amplify, uploads must go directly to backend (avoids Amplify/CloudFront body limits).
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+// Always use relative paths for API calls to trigger Next.js rewrites securely
+const API_URL = "";
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
 
