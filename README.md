@@ -6,11 +6,13 @@
 <br/>
 
 <!-- Animated Typing -->
+
 <a href="https://git.io/typing-svg"><img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=22&pause=1000&color=16A34A&center=true&vCenter=true&multiline=true&repeat=true&width=700&height=80&lines=Upload+a+Video+%E2%86%92+AI+Generates+B-Roll+%E2%86%92+Get+Final+Cut;LLaMA+3+%7C+Stable+Diffusion+XL+%7C+FFmpeg+%7C+Groq+Whisper" alt="Typing SVG" /></a>
 
 <br/><br/>
 
 <!-- Badges -->
+
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/Next.js_14-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)](https://nextjs.org)
@@ -43,7 +45,7 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 
 > 💡 **Why Generative AI instead of Stock APIs?**
 >
-> Stock footage APIs (like Pexels) return generic results. If a speaker says *"A glowing coffee cup next to a 1980s computer,"* stock APIs return plain coffee images. Our **Stable Diffusion pipeline** generates **pixel-perfect, context-aware** visuals that match exactly what the speaker describes — achieving **100% semantic relevance**.
+> Stock footage APIs (like Pexels) return generic results. If a speaker says _"A glowing coffee cup next to a 1980s computer,"_ stock APIs return plain coffee images. Our **Stable Diffusion pipeline** generates **pixel-perfect, context-aware** visuals that match exactly what the speaker describes — achieving **100% semantic relevance**.
 
 ---
 
@@ -78,6 +80,7 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 <td width="50%">
 
 ### 🤖 AI-Powered Pipeline
+
 - **Groq Whisper** — Lightning-fast speech transcription
 - **LLaMA-3.3 70B** — Context-aware prompt generation
 - **Stable Diffusion XL** — Photorealistic B-roll image synthesis
@@ -87,6 +90,7 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 <td width="50%">
 
 ### 🎨 User Controls
+
 - 🔄 **Auto B-Roll Toggle** — Enable/disable AI generation
 - 🎭 **Style Selection** — Cinematic / Cyberpunk / Anime
 - 🌍 **Multi-language** — Auto-detect or manual language select
@@ -98,6 +102,7 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 <td width="50%">
 
 ### ⚡ Performance
+
 - 🔁 **Async Processing** — Background task execution
 - 📡 **Polling Architecture** — No timeout on heavy renders
 - 📐 **Resolution Match** — Zero aspect-ratio distortion
@@ -107,6 +112,7 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 <td width="50%">
 
 ### 🚀 Production Ready
+
 - ☁️ **Cloudinary CDN** — Global edge video delivery
 - 🐳 **Docker Support** — One-command AI service deploy
 - 🔒 **Env-based Config** — Secure API key management
@@ -122,16 +128,16 @@ It uses cutting-edge **Large Language Models (LLaMA-3)**, **Text-to-Image Diffus
 
 <div align="center">
 
-| Layer | Technology | Purpose |
-|:---:|:---:|:---:|
-| 🖥️ **Frontend** | Next.js 14 + Tailwind CSS | Responsive UI with real-time status |
-| 🔌 **Backend Proxy** | Node.js + Express + Multer | File upload buffering & API routing |
-| 🧠 **AI Engine** | Python + FastAPI | Core pipeline orchestration |
-| 🗣️ **Transcription** | Groq Whisper API | Speech-to-text with timestamps |
-| 💬 **LLM** | LLaMA-3.3-70B (Groq) | Context analysis & prompt engineering |
-| 🎨 **Image Gen** | Stable Diffusion XL (HuggingFace) | Text-to-image B-roll generation |
-| 🎬 **Video Engine** | FFmpeg | Compositing, transitions, subtitles |
-| ☁️ **CDN** | Cloudinary | Cloud storage & video delivery |
+|        Layer         |            Technology             |                Purpose                |
+| :------------------: | :-------------------------------: | :-----------------------------------: |
+|   🖥️ **Frontend**    |     Next.js 14 + Tailwind CSS     |  Responsive UI with real-time status  |
+| 🔌 **Backend Proxy** |    Node.js + Express + Multer     |  File upload buffering & API routing  |
+|   🧠 **AI Engine**   |         Python + FastAPI          |      Core pipeline orchestration      |
+| 🗣️ **Transcription** |         Groq Whisper API          |    Speech-to-text with timestamps     |
+|      💬 **LLM**      |       LLaMA-3.3-70B (Groq)        | Context analysis & prompt engineering |
+|   🎨 **Image Gen**   | Stable Diffusion XL (HuggingFace) |    Text-to-image B-roll generation    |
+| 🎬 **Video Engine**  |              FFmpeg               |  Compositing, transitions, subtitles  |
+|      ☁️ **CDN**      |            Cloudinary             |    Cloud storage & video delivery     |
 
 </div>
 
@@ -161,15 +167,15 @@ graph LR
 
 ### Step-by-Step Breakdown
 
-| Step | Process | Technology | What Happens |
-|:---:|:---:|:---:|:---|
-| 1️⃣ | **Audio Extraction** | FFmpeg subprocess | Video → `.mp3` audio file extracted |
-| 2️⃣ | **Transcription** | Groq Whisper API | Audio → timestamped text segments |
-| 3️⃣ | **Context Analysis** | LLaMA-3.3-70B | Transcript → cinematic image prompts |
-| 4️⃣ | **B-Roll Generation** | Stable Diffusion XL | Prompts → photorealistic images |
-| 5️⃣ | **Motion Animation** | FFmpeg zoompan | Static images → animated video clips |
-| 6️⃣ | **Compositing** | FFmpeg filter_complex | Overlay B-roll + burn SRT subtitles |
-| 7️⃣ | **Cloud Delivery** | Cloudinary API | Upload → global CDN URL returned |
+| Step |        Process        |      Technology       | What Happens                         |
+| :--: | :-------------------: | :-------------------: | :----------------------------------- |
+|  1️⃣  | **Audio Extraction**  |   FFmpeg subprocess   | Video → `.mp3` audio file extracted  |
+|  2️⃣  |   **Transcription**   |   Groq Whisper API    | Audio → timestamped text segments    |
+|  3️⃣  | **Context Analysis**  |     LLaMA-3.3-70B     | Transcript → cinematic image prompts |
+|  4️⃣  | **B-Roll Generation** |  Stable Diffusion XL  | Prompts → photorealistic images      |
+|  5️⃣  | **Motion Animation**  |    FFmpeg zoompan     | Static images → animated video clips |
+|  6️⃣  |    **Compositing**    | FFmpeg filter_complex | Overlay B-roll + burn SRT subtitles  |
+|  7️⃣  |  **Cloud Delivery**   |    Cloudinary API     | Upload → global CDN URL returned     |
 
 ---
 
@@ -196,6 +202,9 @@ cd ClipAI_Intern
 <summary>📁 <b>ai-service/.env</b> (click to expand)</summary>
 
 ```env
+# Sarvam API — for speech-to-text / Hindi captions
+SARVAM_API_KEY="sk_..."
+
 # Groq API — for LLaMA-3 and Whisper
 GROQ_API_KEY="gsk_..."
 
@@ -263,6 +272,7 @@ Navigate to **http://localhost:3000** → Upload a video → Watch AI magic happ
 <td align="center" width="33%">
 
 #### 🎨 Frontend
+
 **Vercel**
 
 [![Deploy](https://img.shields.io/badge/Live-clip--ai--intern.vercel.app-000?style=for-the-badge&logo=vercel)](https://clip-ai-intern.vercel.app)
@@ -276,6 +286,7 @@ Env: NEXT_PUBLIC_API_URL
 <td align="center" width="33%">
 
 #### 🔌 Backend
+
 **Render (Node.js)**
 
 [![Deploy](https://img.shields.io/badge/Live-clipai--intern--1.onrender.com-46E3B7?style=for-the-badge&logo=render)](https://clipai-intern-1.onrender.com)
@@ -289,6 +300,7 @@ Env: AI_SERVICE_URL
 <td align="center" width="33%">
 
 #### 🧠 AI Engine
+
 **Render (Docker)**
 
 [![Deploy](https://img.shields.io/badge/Live-clipai--intern.onrender.com-46E3B7?style=for-the-badge&logo=render)](https://clipai-intern.onrender.com)
@@ -339,13 +351,13 @@ Contributions are welcome! Here's how to get involved:
 
 ### Ideas for Contribution
 
-| Area | Idea | Difficulty |
-|:---:|:---|:---:|
-| 🎨 | Add more visual styles (Watercolor, Pixel Art) | 🟢 Easy |
-| 🔊 | Add background music overlay | 🟡 Medium |
-| 📊 | Redis/Celery job queue for scaling | 🟡 Medium |
-| 🎥 | AI video generation (instead of images) | 🔴 Hard |
-| 🌐 | Multi-language subtitle support | 🟡 Medium |
+| Area | Idea                                           | Difficulty |
+| :--: | :--------------------------------------------- | :--------: |
+|  🎨  | Add more visual styles (Watercolor, Pixel Art) |  🟢 Easy   |
+|  🔊  | Add background music overlay                   | 🟡 Medium  |
+|  📊  | Redis/Celery job queue for scaling             | 🟡 Medium  |
+|  🎥  | AI video generation (instead of images)        |  🔴 Hard   |
+|  🌐  | Multi-language subtitle support                | 🟡 Medium  |
 
 ---
 
