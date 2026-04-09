@@ -2,7 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
-// Always use relative paths for API calls to trigger Next.js rewrites securely
+// Video uploads go DIRECTLY to backend to bypass CloudFront 413 body size limit
+const UPLOAD_URL = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+// Status/polling uses relative path (Next.js proxy) to avoid Mixed Content errors
 const API_URL = "";
 
 type Status = "idle" | "uploading" | "processing" | "complete" | "error";
@@ -91,7 +93,7 @@ export default function Home() {
         setProgress((prev) => Math.min(prev + 15, 95));
       }, 200);
 
-      const response = await fetch(`${API_URL}/api/upload`, {
+      const response = await fetch(`${UPLOAD_URL}/api/upload`, {
         method: "POST",
         body: formData,
       });
