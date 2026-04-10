@@ -1046,6 +1046,12 @@ def burn_complex_video(
         except:
             target_w, target_h = 1920, 1080
 
+        # Anti-Crash: Scale down massive videos (like 3020x1530 Mac screen recordings) to max 1080p equivalent
+        if target_w > 1920 or target_h > 1920:
+            scale_ratio = min(1920 / target_w, 1080 / target_h)
+            target_w = int(target_w * scale_ratio)
+            target_h = int(target_h * scale_ratio)
+
         target_w -= target_w % 2
         target_h -= target_h % 2
         target_res = f"{target_w}x{target_h}"
