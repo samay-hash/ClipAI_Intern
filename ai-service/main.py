@@ -18,6 +18,8 @@ import cloudinary.api
 from groq import Groq
 from sarvamai import SarvamAI
 from pymongo import MongoClient
+import boto3
+import time
 
 load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI")
@@ -63,6 +65,29 @@ groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 sarvam_client = (
     SarvamAI(api_subscription_key=SARVAM_API_KEY) if SARVAM_API_KEY else None
 )
+
+# AWS Configuration
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET = os.getenv("S3_BUCKET")
+
+s3_client = None
+transcribe_client = None
+
+if all([AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_BUCKET]):
+    s3_client = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
+    transcribe_client = boto3.client(
+        "transcribe",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_REGION,
+    )
 
 app = FastAPI(title="AI Video Editor Service")
 
@@ -413,6 +438,112 @@ def transcribe_audio_sarvam(audio_path: str, language: str = None) -> list:
         return segments
     except Exception as e:
         print(f"Sarvam transcription error: {e}")
+        return []
+
+
+def transcribe_audio_aws(audio_path: str, language: str = "auto") -> list:
+    """Use AWS Transcribe for speech-to-text."""
+    if not transcribe_client or not s3_client:
+        print("AWS Transcribe not configured.")
+        return []
+
+    try:
+        job_id = f"transcribe_{uuid.uuid4().hex[:8]}"
+        file_ext = Path(audio_path).suffix
+        s1_key = f"transcribe_input/{job_id}{file_ext}"
+
+        print(f"[{job_id}] Uploading audio to S3 for Transcribe...")
+        s3_client.upload_file(audio_path, S3_BUCKET, s1_key)
+
+        audio_uri = f"s3://{S3_BUCKET}/{s1_key}"
+
+        transcribe_args = {
+            "TranscriptionJobName": job_id,
+            "Media": {"MediaFileUri": audio_uri},
+            "MediaFormat": file_ext.replace(".", ""),
+        }
+
+        if language and language != "auto":
+            lang_map = {
+                "en": "en-US",
+                "hi": "hi-IN",
+                "english": "en-US",
+                "hindi": "hi-IN",
+            }
+            transcribe_args["LanguageCode"] = lang_map.get(language, "en-US")
+        else:
+            transcribe_args["IdentifyLanguage"] = True
+
+        print(f"[{job_id}] Starting AWS Transcribe job...")
+        transcribe_client.start_transcription_job(**transcribe_args)
+
+        while True:
+            status = transcribe_client.get_transcription_job(
+                TranscriptionJobName=job_id
+            )
+            job_status = status["TranscriptionJob"]["TranscriptionJobStatus"]
+            if job_status in ["COMPLETED", "FAILED"]:
+                break
+            time.sleep(2)
+
+        if job_status == "FAILED":
+            print(f"[{job_id}] Transcribe job failed.")
+            return []
+
+        transcript_url = status["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+        response = requests.get(transcript_url)
+        data = response.json()
+
+        segments = []
+        # AWS Transcribe output parsing
+        results = data.get("results", {})
+        items = results.get("items", [])
+
+        # Build segments of roughly 5-10 words each
+        current_seg = {"text": "", "start": None, "end": 0}
+        word_count = 0
+
+        for item in items:
+            if item["type"] == "punctuation":
+                current_seg["text"] += item["alternatives"][0]["content"]
+                continue
+
+            start_t = float(item["start_time"])
+            end_t = float(item["end_time"])
+            content = item["alternatives"][0]["content"]
+
+            if current_seg["start"] is None:
+                current_seg["start"] = start_t
+
+            current_seg["text"] += " " + content
+            current_seg["end"] = end_t
+            word_count += 1
+
+            if word_count >= 8 or content.endswith((".", "?", "!")):
+                segments.append(
+                    {
+                        "start": round(current_seg["start"], 3),
+                        "end": round(current_seg["end"], 3),
+                        "text": current_seg["text"].strip(),
+                    }
+                )
+                current_seg = {"text": "", "start": None, "end": 0}
+                word_count = 0
+
+        if current_seg["text"]:
+            segments.append(
+                {
+                    "start": round(current_seg["start"], 3),
+                    "end": round(current_seg["end"], 3),
+                    "text": current_seg["text"].strip(),
+                }
+            )
+
+        print(f"[{job_id}] ✅ AWS Transcription complete ({len(segments)} segments)")
+        return segments
+
+    except Exception as e:
+        print(f"AWS Transcribe error: {e}")
         return []
 
 
@@ -1121,18 +1252,23 @@ def run_pipeline(
         extract_audio(in_vid, aud_file)
 
         update_job_state(job_id, {"step": "Transcribing with AI...", "progress": 20})
-        if not SARVAM_API_KEY:
-            raise Exception(
-                "SARVAM_API_KEY is required for transcription. Add it to ai-service/.env."
-            )
+        
+        segments = []
+        if transcribe_client:
+            print(f"[{job_id}] 2. Transcribing with AWS Transcribe...")
+            segments = transcribe_audio_aws(aud_file, language=language)
+        
+        if not segments and sarvam_client:
+            print(f"[{job_id}] 2. AWS Transcribe failed or not configured. Falling back to Sarvam AI...")
+            segments = transcribe_audio_sarvam(aud_file, language=language)
+            
+        if not segments and groq_client:
+            print(f"[{job_id}] 2. Falling back to Groq/Whisper...")
+            segments = transcribe_audio_groq(aud_file, language=language)
 
-        print(f"[{job_id}] 2. Transcribing with Sarvam AI...")
-        segments = transcribe_audio_sarvam(aud_file, language=language)
         if not segments:
             raise Exception(
-                "Sarvam transcription failed or produced no captions. "
-                "Check SARVAM_API_KEY, audio quality, and language selection. "
-                "If you want AWS Transcribe fallback, you need AWS credentials and an S3 bucket."
+                "All transcription services failed. Please check your API keys and AWS configuration."
             )
         seg_count = len(segments) if segments else 0
 
@@ -1253,10 +1389,28 @@ def run_pipeline(
             f"[{job_id}] 📊 Quality Score: {quality_report.get('quality_score', 'N/A')}"
         )
 
-        # Upload final video to Cloudinary
-        update_job_state(job_id, {"step": "Uploading to Cloud...", "progress": 95})
+        # Upload final video to Cloud or local
+        update_job_state(job_id, {"step": "Uploading final video...", "progress": 95})
         video_url = f"/api/video/{job_id}"
-        if CLOUDINARY_CLOUD_NAME:
+        
+        # Priority 1: S3
+        if s3_client:
+            try:
+                print(f"[{job_id}] 9. Uploading final video back to S3...")
+                final_s3_key = f"outputs/magical_{job_id}.mp4"
+                s3_client.upload_file(
+                    out_vid,
+                    S3_BUCKET,
+                    final_s3_key,
+                    ExtraArgs={"ContentType": "video/mp4"},
+                )
+                video_url = f"/api/video/{job_id}"
+                print(f"[{job_id}] ✅ Uploaded to S3: outputs/magical_{job_id}.mp4")
+            except Exception as e:
+                print(f"[{job_id}] S3 final upload failed: {e}")
+
+        # Priority 2: Cloudinary (if S3 failed or not configured)
+        if video_url.startswith("/api/") and CLOUDINARY_CLOUD_NAME:
             try:
                 print(f"[{job_id}] 9. Uploading final video to Cloudinary...")
                 res = cloudinary.uploader.upload_large(
@@ -1388,50 +1542,57 @@ async def process_video_url(req: UrlRequest, background_tasks: BackgroundTasks):
 
 class S3Request(BaseModel):
     s3_key: str
+    s3_bucket: str = None
+    language: str = "auto"
+    caption_style: str = "clean"
+    enable_broll: bool = True
+    style: str = "cinematic"
+    max_broll: int = 8
 
 
 @app.post("/process-s3")
-async def process_video_s3(req: S3Request):
+async def process_video_s3(req: S3Request, background_tasks: BackgroundTasks):
     if not s3_client:
-        raise HTTPException(status_code=500, detail="S3 not configured")
+        raise HTTPException(status_code=500, detail="S3 client not initialized")
+        
     job_id = str(uuid.uuid4())[:8]
+    update_job_state(job_id, {"step": "Downloading from S3...", "progress": 5})
+    
+    bucket = req.s3_bucket or S3_BUCKET
     ext = Path(req.s3_key).suffix or ".mp4"
-    in_vid, aud_file, srt_file, out_vid = (
-        str(UPLOAD_DIR / f"{job_id}{ext}"),
-        str(TEMP_DIR / f"{job_id}.wav"),
-        str(TEMP_DIR / f"{job_id}.srt"),
-        str(OUTPUT_DIR / f"{job_id}.mp4"),
-    )
+    
+    in_vid = str(UPLOAD_DIR / f"{job_id}{ext}")
+    aud_file = str(TEMP_DIR / f"{job_id}.mp3")
+    srt_file = str(TEMP_DIR / f"{job_id}.srt")
+    out_vid = str(OUTPUT_DIR / f"{job_id}.mp4")
 
-    try:
-        print(f"[{job_id}] 0. Downloading video from S3...")
-        s3_client.download_file(AWS_BUCKET_NAME, req.s3_key, in_vid)
+    def s3_pipeline():
+        try:
+            print(f"[{job_id}] Downloading S3: {req.s3_key} from {bucket}")
+            s3_client.download_file(bucket, req.s3_key, in_vid)
+            
+            run_pipeline(
+                job_id,
+                in_vid,
+                aud_file,
+                srt_file,
+                out_vid,
+                req.enable_broll,
+                req.style,
+                req.language,
+                req.caption_style,
+                req.max_broll
+            )
+        except Exception as e:
+            print(f"[{job_id}] S3 Pipeline Error: {e}")
+            update_job_state(job_id, {"step": "Failed", "progress": 0, "error": str(e)})
 
-        run_pipeline(job_id, in_vid, aud_file, srt_file, out_vid)
-
-        print(f"[{job_id}] 7. Uploading final video back to S3...")
-        final_s3_key = f"outputs/magical_{job_id}.mp4"
-        s3_client.upload_file(
-            out_vid,
-            AWS_BUCKET_NAME,
-            final_s3_key,
-            ExtraArgs={"ContentType": "video/mp4"},
-        )
-
-        # public url formatting
-        final_url = (
-            f"https://{AWS_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{final_s3_key}"
-        )
-
-        return {
-            "success": True,
-            "job_id": job_id,
-            "video_url": final_url,
-            "message": "Processed successfully",
-        }
-    except Exception as e:
-        print(f"S3 Processing Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    background_tasks.add_task(s3_pipeline)
+    return {
+        "success": True, 
+        "job_id": job_id, 
+        "message": "S3 processing started in background"
+    }
 
 
 @app.get("/video/{job_id}")

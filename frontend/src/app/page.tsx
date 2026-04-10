@@ -78,89 +78,107 @@ export default function Home() {
     setVideoUrl("");
 
     try {
-      // Upload phase
-      const formData = new FormData();
-      formData.append("video", file);
-      formData.append("language", language);
-      formData.append("captionStyle", captionStyle);
-      formData.append("enableBroll", enableBroll.toString());
-      formData.append("style", style);
-      formData.append("maxBroll", maxBroll.toString());
+      // 1. Get Presigned URL from Backend
+      setStatusText("Preparing secure upload...");
+      const presignedRes = await fetch(`${API_URL}/api/get-presigned-url?fileName=${encodeURIComponent(file.name)}&fileType=${encodeURIComponent(file.type)}`);
+      if (!presignedRes.ok) throw new Error("Failed to get upload authorization");
+      const { uploadUrl, key } = await presignedRes.json();
 
-      // Simulate upload progress
-      const uploadInterval = setInterval(() => {
-        setProgress((prev) => Math.min(prev + 15, 95));
-      }, 200);
+      // 2. Upload directly to S3
+      console.log("☁️ Uploading directly to S3...");
+      setStatusText("Uploading directly to AWS S3...");
+      
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", uploadUrl, true);
+      xhr.setRequestHeader("Content-Type", file.type);
+      
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = (e.loaded / e.total) * 100;
+          setProgress(percent);
+        }
+      };
 
-      const response = await fetch(`${UPLOAD_URL}/api/upload`, {
-        method: "POST",
-        body: formData,
+      const uploadPromise = new Promise((resolve, reject) => {
+        xhr.onload = () => (xhr.status === 200 ? resolve(true) : reject(new Error("S3 Upload Failed")));
+        xhr.onerror = () => reject(new Error("Network Error during S3 upload"));
+        xhr.send(file);
       });
 
-      clearInterval(uploadInterval);
+      await uploadPromise;
+      console.log("✅ S3 Upload complete. Key:", key);
 
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || "Upload failed");
+      // 3. Notify Backend to start AI processing
+      setStatus("processing");
+      setProgress(5);
+      setStatusText("Initiating AI processing...");
+
+      const processRes = await fetch(`${API_URL}/api/process-s3`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          s3Key: key,
+          language,
+          captionStyle,
+          enableBroll,
+          style,
+          maxBroll,
+        }),
+      });
+
+      if (!processRes.ok) {
+        const data = await processRes.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to start AI processing");
       }
 
-      const result = await response.json();
+      const { job_id } = await processRes.json();
 
-      if (result.success && result.job_id) {
-        setStatus("processing");
-        setProgress(5);
-        setStatusText("Processing started in background");
-        
-        // Start long-polling for real-time accurate status
-        const pollInterval = setInterval(async () => {
-           try {
-              const pollRes = await fetch(`${API_URL}/api/status/${result.job_id}`);
-              const pollData = await pollRes.json();
-              
-              setProgress(pollData.progress || 10);
-              setStatusText(pollData.step || "Processing...");
-              
-              // Track B-Roll moments as they get detected
-              if (pollData.broll_moments) {
-                setBrollMoments(pollData.broll_moments);
-              }
-              
-              if (pollData.progress === 100 && pollData.result) {
-                 clearInterval(pollInterval);
-                 setSegmentCount(pollData.result.transcript_segments || 0);
-                 if (pollData.result.broll_moments) setBrollMoments(pollData.result.broll_moments);
-                 if (pollData.result.quality_report) setQualityReport(pollData.result.quality_report);
-                 const finalUrl = pollData.result.video_url.startsWith("http") ? pollData.result.video_url : `${API_URL}${pollData.result.video_url}`;
-                 setVideoUrl(finalUrl);
-                 setStatus("complete");
-                 
-                 // Save to gallery
-                 const newHistory = [{
-                   id: result.job_id,
-                   name: file.name,
-                   url: finalUrl,
-                   date: new Date().toLocaleDateString()
-                 }, ...history];
-                 setHistory(newHistory);
-                 localStorage.setItem("clipai_history", JSON.stringify(newHistory));
-              } else if (pollData.step === "Failed") {
-                 clearInterval(pollInterval);
-                 throw new Error(pollData.error || "AI Processing Failed");
-              }
-           } catch(e) {
-              console.error(e);
-           }
-        }, 1500);
+      // 4. Poll for status
+      const pollInterval = setInterval(async () => {
+        try {
+          const pollRes = await fetch(`${API_URL}/api/status/${job_id}`);
+          const pollData = await pollRes.json();
 
-      } else {
-        throw new Error(result.error || "Processing initialization failed");
-      }
+          setProgress(pollData.progress || 10);
+          setStatusText(pollData.step || "Processing...");
+
+          if (pollData.broll_moments) {
+            setBrollMoments(pollData.broll_moments);
+          }
+
+          if (pollData.progress === 100 && pollData.result) {
+            clearInterval(pollInterval);
+            setSegmentCount(pollData.result.transcript_segments || 0);
+            if (pollData.result.broll_moments) setBrollMoments(pollData.result.broll_moments);
+            const finalUrl = pollData.result.video_url;
+            setVideoUrl(finalUrl);
+            setStatus("complete");
+
+            const newHistory = [{
+              id: job_id,
+              name: file.name,
+              url: finalUrl,
+              date: new Date().toLocaleDateString()
+            }, ...history];
+            setHistory(newHistory);
+            localStorage.setItem("clipai_history", JSON.stringify(newHistory));
+          } else if (pollData.step === "Failed") {
+            clearInterval(pollInterval);
+            throw new Error(pollData.error || "AI Processing Failed");
+          }
+        } catch (e) {
+          console.error("Polling error:", e);
+        }
+      }, 2000);
+
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Something went wrong";
+      console.error("Upload error:", err);
+      const message = err instanceof Error ? err.message : "Something went wrong during upload";
       setErrorMsg(message);
       setStatus("error");
     }
   }, [language, captionStyle, enableBroll, style, maxBroll, history]);
+
 
 
   const handleDrop = useCallback(
